@@ -8,6 +8,8 @@ from rich.console import Console
 
 from . import capture as capture_mod
 from . import config, db, inspect as inspect_mod, normalize as normalize_mod, session
+from . import index as index_mod
+from . import search as search_mod
 
 app = typer.Typer(
     add_completion=False,
@@ -133,6 +135,60 @@ def status() -> None:
     console.print(f"Last sync    : {db.get_state(conn, 'last_sync_at') or 'never'}")
     console.print(f"Groq key     : {'[green]set[/green]' if config.GROQ_API_KEY else '[red]missing[/red]'}")
     conn.close()
+
+
+@app.command()
+def index(
+    rebuild: bool = typer.Option(False, "--rebuild", help="Discard chunks and embed everything again."),
+) -> None:
+    """Chunk and embed the captured bookmarks."""
+    conn = index_mod.connect()
+    with console.status("Indexing...") as status:
+        def on_progress(stage: str, done: int, total: int) -> None:
+            status.update(f"{stage}: {done}/{total}")
+
+        stats = index_mod.build(conn, rebuild=rebuild, on_progress=on_progress)
+    conn.close()
+    console.print(
+        f"[green]{stats['chunks']:,} chunks, {stats['embedded']:,} embedded[/green] "
+        f"[dim](+{stats['added']} new, -{stats['removed']} stale)[/dim]"
+    )
+
+
+@app.command()
+def search(
+    query: list[str] = typer.Argument(..., help="What you are looking for."),
+    limit: int = typer.Option(10, "--limit", "-n"),
+    author: str = typer.Option(None, "--author", "-a", help="Restrict to one handle."),
+    source: str = typer.Option(None, "--source", help="post, quote, article, or link."),
+) -> None:
+    """Search your bookmarks in natural language."""
+    text = " ".join(query)
+    conn = index_mod.connect()
+    if not conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]:
+        console.print("[yellow]Nothing indexed yet. Run `xbm index` first.[/yellow]")
+        raise typer.Exit(1)
+    hits = search_mod.search(conn, text, limit=limit, author=author, source=source)
+    conn.close()
+
+    if not hits:
+        console.print("[yellow]No matches.[/yellow]")
+        raise typer.Exit(1)
+
+    for rank, hit in enumerate(hits, 1):
+        when = (hit.created_at or "")[:10]
+        tags = [hit.best_source]
+        if hit.media:
+            tags.append(hit.media)
+        if hit.lang and hit.lang != "en":
+            tags.append(hit.lang)
+        console.print(
+            f"[bold cyan]{rank:2}.[/bold cyan] [bold]{hit.author}[/bold] "
+            f"[dim]{when} · {' · '.join(tags)} · {hit.score:.4f}[/dim]"
+        )
+        body = " ".join(hit.text.split())
+        console.print(f"    {body[:240]}{'...' if len(body) > 240 else ''}")
+        console.print(f"    [blue]{hit.url}[/blue]\n")
 
 
 if __name__ == "__main__":
