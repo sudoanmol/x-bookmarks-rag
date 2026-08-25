@@ -305,12 +305,18 @@ def pending(conn: sqlite3.Connection, *, retry_failed: bool = False) -> list[Job
 # Four is where the gain flattened on this machine.
 WORKERS = 4
 
+# X throttles one session hitting it from several browsers at once: 61 of 153
+# articles came back empty in parallel and every one of them succeeded on a
+# serial retry. Links do not have this problem, because they are spread over
+# hundreds of hosts. So articles get a single lane and links keep the rest.
+ARTICLE_WORKERS = 1
+
 
 def run(conn: sqlite3.Connection, jobs: list[Job], *, on_progress=None) -> dict[str, int]:
-    """Fetch every job across a few browsers.
+    """Fetch every job.
 
-    Articles use the X session. Links get a context with no storage state, so
-    an external site never sees the login.
+    Articles use the X session, one at a time. Links get contexts with no
+    storage state, so an external site never sees the login.
     """
     import threading
 
@@ -319,17 +325,17 @@ def run(conn: sqlite3.Connection, jobs: list[Job], *, on_progress=None) -> dict[
     done = [0]
     total = len(jobs)
 
-    # Articles first: they are the reason the session exists, and they fail
-    # fast if it has expired.
-    jobs = sorted(jobs, key=lambda j: j.kind != "x_article")
-    lanes = [jobs[i::WORKERS] for i in range(WORKERS)]
-
     def report(doc: Document) -> None:
         with lock:
             tally["failed" if doc.error and not doc.body else "ok"] += 1
             done[0] += 1
             if on_progress:
                 on_progress(done[0], total, doc)
+
+    articles = [j for j in jobs if j.kind == "x_article"]
+    links = [j for j in jobs if j.kind != "x_article"]
+    lanes = [articles[i::ARTICLE_WORKERS] for i in range(ARTICLE_WORKERS)]
+    lanes += [links[i::WORKERS] for i in range(WORKERS)]
 
     threads = [
         threading.Thread(target=_worker, args=(lane, report), daemon=True)
