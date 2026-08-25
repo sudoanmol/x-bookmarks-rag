@@ -214,8 +214,12 @@ def search(
             f"[bold cyan]{rank:2}.[/bold cyan] [bold]{hit.author}[/bold] "
             f"[dim]{when} · {' · '.join(tags)} · {hit.score:.4f}[/dim]"
         )
-        body = " ".join(hit.text.split())
-        console.print(f"    {body[:240]}{'...' if len(body) > 240 else ''}")
+        # Show the passage that actually matched. Printing the post instead
+        # hides why a hit ranked, which is the whole question being asked.
+        passage = " ".join(hit.best_chunk.split())
+        console.print(f"    {passage[:280]}{'...' if len(passage) > 280 else ''}")
+        if hit.best_ref:
+            console.print(f"    [dim]from {hit.best_ref}[/dim]")
         console.print(f"    [blue]{hit.url}[/blue]\n")
 
 

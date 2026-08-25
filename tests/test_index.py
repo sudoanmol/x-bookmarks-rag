@@ -198,3 +198,30 @@ def test_a_card_is_dropped_when_its_page_was_extracted():
     assert chunk_mod.chunks_for_links(rows) != []
     # The document was stored under the normalized URL.
     assert chunk_mod.chunks_for_links(rows, covered={"https://example.com/a"}) == []
+
+
+@pytest.mark.parametrize(
+    "line, dropped",
+    [
+        ("| 0.13 | -0.51 | -0.63 |", True),
+        ("|  |  |  |", True),
+        ("| --- | --- | --- |", True),
+        ("| 12% | +3 | -0.4 |", True),
+        ("| Model | R@1 | MRR |", False),
+        ("| gpt | 0.5 | 0.6 |", False),
+        ("Just prose, 0.13 and -0.51.", False),
+    ],
+)
+def test_only_wordless_table_rows_are_dropped(line, dropped):
+    from x_bookmarks_rag import chunk as chunk_mod
+
+    assert chunk_mod.is_number_table(line) is dropped
+
+
+def test_a_matrix_leaves_the_prose_around_it_intact():
+    from x_bookmarks_rag import chunk as chunk_mod
+
+    html = "<p>We multiply:</p><table><tr><td>0.13</td><td>-0.51</td></tr></table><p>But then</p>"
+    text = chunk_mod.to_text(html)
+    assert "We multiply" in text and "But then" in text
+    assert "0.13" not in text

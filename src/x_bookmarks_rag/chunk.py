@@ -121,6 +121,11 @@ def chunks_for_links(rows: list[sqlite3.Row], *, covered: set[str] | None = None
 # the later layers need. Embeddings want prose, so the markup comes off here.
 BLANK_RUN = re.compile(r"\n{3,}")
 
+# A markdown table row: | a | b | c |
+TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+# What is left of a row once the pipes, digits, signs, and rules come off.
+TABLE_NOISE = re.compile(r"[\d\s|:.,%+\-—–]+")
+
 
 def to_text(html: str) -> str:
     """Flatten extracted HTML into prose.
@@ -131,8 +136,20 @@ def to_text(html: str) -> str:
     if not html:
         return ""
     text = markdownify(html, strip=["a", "img"], heading_style="ATX")
-    text = "\n".join(line.rstrip() for line in text.splitlines())
-    return BLANK_RUN.sub("\n\n", text).strip()
+    kept = [line.rstrip() for line in text.splitlines() if not is_number_table(line)]
+    return BLANK_RUN.sub("\n\n", "\n".join(kept)).strip()
+
+
+def is_number_table(line: str) -> bool:
+    """True for a table row carrying no words.
+
+    An article that shows a matrix renders as rows of floats. Embedding those
+    matches nothing and still wins the ranking for its bookmark, because the
+    row is short and dense.
+    """
+    if not TABLE_ROW.match(line):
+        return False
+    return not TABLE_NOISE.sub("", line).strip()
 
 
 def chunks_for_documents(rows: list[sqlite3.Row]) -> list[Chunk]:

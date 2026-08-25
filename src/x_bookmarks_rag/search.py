@@ -34,6 +34,9 @@ class Hit:
     score: float
     best_source: str
     best_chunk: str
+    # Where the matched passage came from: the page URL for a link or article,
+    # None when the post itself matched. A caller citing a passage needs this.
+    best_ref: str | None
     lang: str | None
     media: str | None
 
@@ -92,7 +95,7 @@ def search(
     placeholders = ",".join("?" * len(fused))
     rows = conn.execute(
         f"""
-        SELECT c.id, c.tweet_id, c.source, c.text AS chunk_text,
+        SELECT c.id, c.tweet_id, c.source, c.text AS chunk_text, c.ref,
                b.url, b.text, b.created_at, b.lang,
                a.screen_name,
                (SELECT GROUP_CONCAT(DISTINCT kind) FROM media WHERE tweet_id = b.tweet_id) AS media
@@ -127,6 +130,7 @@ def search(
             score=score,
             best_source=row["source"],
             best_chunk=row["chunk_text"],
+            best_ref=row["ref"],
             lang=row["lang"],
             media=row["media"],
         )
