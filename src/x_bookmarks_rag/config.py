@@ -7,9 +7,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Explicit path: find_dotenv() walks up from the calling frame, which breaks
+# when the caller has no file (a stdin script, a REPL).
+load_dotenv(PROJECT_ROOT / ".env")
 
 # The session file holds a live X login. It stays outside the repository so a
 # stray `git add -f` can never commit it.
