@@ -7,6 +7,7 @@ from playwright.sync_api import sync_playwright
 from rich.console import Console
 
 from . import capture as capture_mod
+from . import extract as extract_mod
 from . import config, db, inspect as inspect_mod, normalize as normalize_mod, session
 from . import index as index_mod
 from . import search as search_mod
@@ -135,6 +136,33 @@ def status() -> None:
     console.print(f"Last sync    : {db.get_state(conn, 'last_sync_at') or 'never'}")
     console.print(f"Groq key     : {'[green]set[/green]' if config.GROQ_API_KEY else '[red]missing[/red]'}")
     conn.close()
+
+
+@app.command()
+def extract(
+    limit: int = typer.Option(None, "--limit", "-n", help="Stop after this many documents."),
+    retry: bool = typer.Option(False, "--retry", help="Try the failed URLs again."),
+) -> None:
+    """Fetch the full text behind articles and links."""
+    conn = extract_mod.connect()
+    jobs = extract_mod.pending(conn, retry_failed=retry)
+    if limit:
+        jobs = jobs[:limit]
+    if not jobs:
+        console.print("[green]Everything is extracted.[/green]")
+        return
+
+    articles = sum(1 for j in jobs if j.kind == "x_article")
+    console.print(f"[dim]{articles} articles, {len(jobs) - articles} links[/dim]")
+
+    with console.status("Extracting...") as status:
+        def on_progress(done: int, total: int, doc) -> None:
+            mark = "[red]x[/red]" if doc.error and not doc.body else "[green]ok[/green]"
+            status.update(f"{done}/{total} {mark} {doc.url[:70]}")
+
+        tally = extract_mod.run(conn, jobs, on_progress=on_progress)
+    conn.close()
+    console.print(f"[green]{tally['ok']:,} extracted[/green] [dim]{tally['failed']:,} failed[/dim]")
 
 
 @app.command()

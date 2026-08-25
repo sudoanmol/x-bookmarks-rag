@@ -108,6 +108,8 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path or config.DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
+    # Extraction runs several browsers at once, each with its own connection.
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
     return conn

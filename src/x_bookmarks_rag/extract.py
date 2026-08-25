@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS documents (
     word_count  INTEGER NOT NULL DEFAULT 0,
     lang        TEXT,
     fetched_at  TEXT,
+    attempts    INTEGER NOT NULL DEFAULT 0,
     error       TEXT
 );
 
@@ -254,15 +255,170 @@ def save(conn: sqlite3.Connection, doc: Document) -> None:
     conn.execute(
         """
         INSERT INTO documents(url, kind, depth, tweet_id, title, author, site,
-                              published, body, word_count, lang, fetched_at, error)
+                              published, body, word_count, lang, fetched_at,
+                              attempts, error)
         VALUES(:url, :kind, :depth, :tweet_id, :title, :author, :site,
-               :published, :body, :word_count, :lang, :now, :error)
+               :published, :body, :word_count, :lang, :now, 1, :error)
         ON CONFLICT(url) DO UPDATE SET
             title = excluded.title, author = excluded.author, site = excluded.site,
             published = excluded.published, body = excluded.body,
             word_count = excluded.word_count, lang = excluded.lang,
-            fetched_at = excluded.fetched_at, error = excluded.error
+            fetched_at = excluded.fetched_at, error = excluded.error,
+            attempts = documents.attempts + 1
         """,
         {**doc.__dict__, "now": db.now_iso()},
     )
     conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Batch run
+# --------------------------------------------------------------------------
+
+# Two failures are enough to call a URL dead. Most are 404s and paywalls, and
+# a third attempt costs 30 seconds to learn the same thing.
+MAX_ATTEMPTS = 2
+
+ARTICLE_SQL = """
+SELECT b.tweet_id, a.screen_name AS handle
+  FROM bookmarks b JOIN authors a ON a.author_id = b.author_id
+ WHERE b.article_id IS NOT NULL AND b.removed_at IS NULL
+ ORDER BY b.sort_index DESC
+"""
+
+LINK_SQL = """
+SELECT l.url, MIN(l.tweet_id) AS tweet_id
+  FROM links l JOIN bookmarks b ON b.tweet_id = l.tweet_id
+ WHERE b.removed_at IS NULL
+ GROUP BY l.url
+"""
+
+
+@dataclass
+class Job:
+    url: str
+    kind: str
+    tweet_id: str | None = None
+
+
+def pending(conn: sqlite3.Connection, *, retry_failed: bool = False) -> list[Job]:
+    """List the documents still worth fetching.
+
+    A URL that succeeded is never refetched. A URL that failed is retried until
+    it runs out of attempts, so an interrupted run resumes where it stopped.
+    """
+    done: dict[str, int] = {}
+    for row in conn.execute("SELECT url, error, attempts FROM documents"):
+        done[row["url"]] = -1 if not row["error"] else row["attempts"]
+
+    def wanted(url: str) -> bool:
+        attempts = done.get(url)
+        if attempts is None:
+            return True
+        if attempts < 0:
+            return False
+        return retry_failed or attempts < MAX_ATTEMPTS
+
+    jobs: list[Job] = []
+    for row in conn.execute(ARTICLE_SQL):
+        url = f"https://x.com/{row['handle']}/status/{row['tweet_id']}"
+        if wanted(url):
+            jobs.append(Job(url, "x_article", row["tweet_id"]))
+
+    seen: set[str] = set()
+    for row in conn.execute(LINK_SQL):
+        url = normalize_url(row["url"])
+        if url in seen:
+            continue
+        seen.add(url)
+        if wanted(url):
+            jobs.append(Job(url, "link", row["tweet_id"]))
+
+    return jobs
+
+
+# Fetching is almost all waiting on the network, so several browsers pay off.
+# Four is where the gain flattened on this machine.
+WORKERS = 4
+
+
+def run(conn: sqlite3.Connection, jobs: list[Job], *, on_progress=None) -> dict[str, int]:
+    """Fetch every job across a few browsers.
+
+    Articles use the X session. Links get a context with no storage state, so
+    an external site never sees the login.
+    """
+    import threading
+
+    lock = threading.Lock()
+    tally = {"ok": 0, "failed": 0}
+    done = [0]
+    total = len(jobs)
+
+    # Articles first: they are the reason the session exists, and they fail
+    # fast if it has expired.
+    jobs = sorted(jobs, key=lambda j: j.kind != "x_article")
+    lanes = [jobs[i::WORKERS] for i in range(WORKERS)]
+
+    def report(doc: Document) -> None:
+        with lock:
+            tally["failed" if doc.error and not doc.body else "ok"] += 1
+            done[0] += 1
+            if on_progress:
+                on_progress(done[0], total, doc)
+
+    threads = [
+        threading.Thread(target=_worker, args=(lane, report), daemon=True)
+        for lane in lanes
+        if lane
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    return tally
+
+
+def _worker(jobs: list[Job], report) -> None:
+    """One browser, one database connection, one slice of the work.
+
+    Playwright's sync API is bound to the thread that created it, so each
+    worker builds its own from scratch.
+    """
+    from playwright.sync_api import sync_playwright
+
+    from . import config
+
+    conn = connect()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        contexts: dict[bool, object] = {}
+        try:
+            for job in jobs:
+                needs_session = job.kind == "x_article"
+                if needs_session not in contexts:
+                    contexts[needs_session] = browser.new_context(
+                        bypass_csp=True,
+                        **(
+                            {"storage_state": str(config.STATE_PATH)}
+                            if needs_session
+                            else {}
+                        ),
+                    )
+                page = contexts[needs_session].new_page()
+                try:
+                    if needs_session:
+                        doc = extract_x_article(page, job.url, job.tweet_id)
+                    else:
+                        doc = extract_one(
+                            page, job.url, kind=job.kind, tweet_id=job.tweet_id
+                        )
+                finally:
+                    page.close()
+
+                save(conn, doc)
+                report(doc)
+        finally:
+            browser.close()
+    conn.close()
