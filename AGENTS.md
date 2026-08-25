@@ -1,0 +1,332 @@
+# x-bookmarks-rag
+
+Natural-language search over the owner's X (Twitter) bookmarks. It captures
+bookmarks with a real browser, extracts the full text behind articles and
+links, embeds everything locally, and searches with hybrid retrieval.
+
+No X API. No paid services. Everything runs on this machine, except Groq,
+which is used only on its free tier.
+
+**This file is the handoff.** Read all of it before you change anything. Many
+rules below cost hours to learn. The reasons are given so you can tell when a
+rule stops applying.
+
+---
+
+## 1. Rules you must not break
+
+These come from the owner. They override your defaults.
+
+| Rule | Why |
+| --- | --- |
+| Use `uv` for everything: `uv run`, `uv add`, `uv venv`. | Project standard. |
+| Add dependencies with `uv add`. Never hand-edit `pyproject.toml`. | Keeps the lock file correct. |
+| Use `trash`, never `rm`. | A hook blocks `rm`. |
+| Never pass `-c user.email` or `-c user.name` to git. | The global git config is already correct. The owner had to clean up commits once because of this. |
+| Never commit secrets. `.env` holds `GROQ_API_KEY`. | |
+| Push only when the owner asks. The repo is local and has never been pushed. | |
+| Do not add backward compatibility, fallbacks, or migrations. Remove the old path. | Owner's rule. See §7 for how schema changes are done here. |
+| Do not build speculative abstractions. Build the simplest thing that fully meets the requirement. | Owner's rule: "refuse to solve problems we don't have". |
+| Measure before you design. Look at the real data first. | Every good decision in this repo came from doing this. Every mistake came from skipping it. |
+
+The owner writes and expects **ASD-STE100 Simplified Technical English**: short
+sentences, active voice, one meaning per word.
+
+### The session file
+
+`~/.config/x-bookmarks/state.json` (mode 0600) holds a **live X login**. It sits
+outside the repo on purpose.
+
+- Never copy it into the repo.
+- Never print its contents.
+- Only X Article pages may use it. Every external page gets a browser context
+  with **no** storage state, so a third-party site never sees the login.
+
+---
+
+## 2. Commands
+
+```bash
+uv run xbm login      # opens a browser; the owner signs in by hand
+uv run xbm sync       # capture new bookmarks since the watermark
+uv run xbm status     # session and sync state
+uv run xbm inspect    # report what the captured data contains
+uv run xbm normalize  # rebuild the DB from raw pages on disk
+uv run xbm extract    # fetch full text behind articles and links
+uv run xbm index      # chunk and embed  (--rebuild to redo everything)
+uv run xbm search "..."  # hybrid search  (-n, --author, --source)
+
+uv run pytest -q      # 78 tests, all offline, ~0.6s
+```
+
+Ollama must be running, with `embeddinggemma` pulled. That is the only model
+the project needs.
+
+---
+
+## 3. Architecture
+
+Data flows one way. Each stage only reads what the stage before it wrote.
+
+```
+X GraphQL  ->  capture  ->  raw pages (JSON on disk)
+                              |
+                           parse + normalize
+                              |
+                           bookmarks / authors / media / links
+                              |
+                    extract (Playwright + Defuddle)  ->  documents
+                              |
+                           chunk  ->  embed  ->  chunks + chunk_vec + chunk_fts
+                              |
+                           search (RRF over vector + BM25)
+```
+
+| Module | Job |
+| --- | --- |
+| `config.py` | Paths, URLs, pacing. Loads `.env` by **explicit path** (see §8). |
+| `session.py` | Saves and loads the browser storage state. |
+| `capture.py` | Drives the bookmarks page and intercepts GraphQL responses. |
+| `parse.py` | Turns a GraphQL page into rows. Network-free, so it is fully testable. |
+| `normalize.py` | Rebuilds the DB from raw pages. |
+| `db.py` | Schema and idempotent upserts. Owns **all** tables. |
+| `extract.py` | Renders pages and pulls readable text with Defuddle. |
+| `chunk.py` | Turns rows and documents into embeddable pieces. |
+| `embed.py` | Ollama calls. Asymmetric prefixes (see §8). |
+| `index.py` | Builds `chunks`, `chunk_vec`, `chunk_fts`. Owns the vec0 connection. |
+| `search.py` | Hybrid retrieval with reciprocal rank fusion. |
+| `inspect.py` | The gate report that drives build decisions. |
+| `cli.py` | Typer entry point. |
+
+### Two connection functions. Do not mix them.
+
+- `db.connect()` — plain SQLite. Use for everything normal.
+- `index.connect()` — **loads the sqlite-vec extension.** Any query touching
+  `chunk_vec` fails with `no such module: vec0` without it.
+
+---
+
+## 4. Data model
+
+All tables live in `db.py`. `data/bookmarks.db`, WAL mode, `busy_timeout=30000`.
+
+| Table | Notes |
+| --- | --- |
+| `authors` | `author_id` PK, `screen_name`, `name`, `avatar_url`, `verified`, `description`. Quoted-post authors are deliberately **not** stored. |
+| `bookmarks` | `tweet_id` PK, `sort_index`, `text`, `is_long`, `lang`, `quoted_text`, `article_id`, `article_title`, `article_preview`, `removed_at`. |
+| `media` | `media_key` PK, `kind` (photo/video/animated_gif), `url`, `alt_text`, `duration_ms`, `bitrate`, **`small_url`/`small_bitrate`**. |
+| `links` | `(tweet_id, url)` PK, `domain`, `title`, `description`, `from_card`. |
+| `documents` | `url` PK, `kind` (x_article/link), `tweet_id`, `title`, `body` (**HTML**), `word_count`, `attempts`, `error`. |
+| `enrichment` | `(kind, ref)` PK, `state`, `attempts`, `provider`, `error`. Built for captions and transcripts. **Not used yet.** |
+| `chunks` | `id`, `tweet_id`, `source` (post/quote/article/link), `ref`, `position`, `text`, `source_text`, `lang`, `hash`. |
+| `chunk_vec` | vec0 virtual table, `FLOAT[768]`. |
+| `chunk_fts` | fts5 external-content table over `chunks`. |
+| `sync_state` | `watermark` = highest `sort_index` seen. |
+| `raw_pages` | Every captured GraphQL page. **The DB can always be rebuilt from these.** |
+
+Two design points worth keeping:
+
+- **Soft delete.** Un-bookmarking sets `removed_at`, so enrichment survives.
+- **`sort_index`, not post time.** It orders by *bookmark* time, which is what
+  incremental sync needs.
+
+---
+
+## 5. Current state (all verified, not estimated)
+
+| Thing | Count |
+| --- | --- |
+| Bookmarks | 1,211 |
+| Authors | 779 |
+| Media | 843 — 541 photo, 294 video, 8 gif |
+| Media with alt text | **10** |
+| Links (unique) | 544 |
+| Documents | 693 stored, **670 usable** |
+| Extracted words | **1,087,352** |
+| Chunks / vectors | 3,437 / 3,437 |
+| Video | 42.0 hours: 249 clips under 10 min, 45 over |
+
+Layers 1 and 2 are done and working. Search returns real passages from
+extracted pages, not just post text.
+
+The 23 unusable documents are honest failures: 10 binary targets (PDFs),
+9 bot walls or paywalls, 4 dead domains.
+
+---
+
+## 6. Decisions already made. Do not re-open these.
+
+**Embedding model: `embeddinggemma`.** Benchmarked against 4 alternatives on 55
+generated queries over the real corpus.
+
+| Model | Dims | R@1 | R@5 | MRR |
+| --- | --: | --: | --: | --: |
+| **embeddinggemma** | 768 | **0.564** | 0.727 | **0.642** |
+| qwen3-embedding:0.6b | 1024 | 0.509 | 0.818 | 0.626 |
+| bge-m3 | 1024 | 0.455 | 0.727 | 0.583 |
+| nomic-embed-text | 768 | 0.436 | 0.618 | 0.536 |
+
+At 55 queries the 95% band is about ±0.13, so **no model separates**. The
+decision was made on speed: 3,437 chunks embed in about 2 minutes, where a 4B
+model needs 30 to 60. The benchmark measured dense retrieval alone; the real
+system also runs BM25, which narrows the gap further. The rejected models were
+deleted to free 17.4 GB.
+
+**Depth-1 crawling: none.** The owner chose this after seeing the numbers:
+5,342 outbound URLs, about 2.2 hours, and roughly 7x index growth, dominated by
+GitHub repository navigation and documentation sidebars. Nothing is lost —
+the outbound links are still inside `documents.body`, so this can be turned on
+later without re-fetching.
+
+**No LLM answer layer.** The owner will use this mostly through MCP, where the
+agent is already the model. Pre-summarizing would compress the evidence, and
+the agent would then summarize the summary. Retrieval returns passages; the
+caller reasons.
+
+**One vector space** for all content types, rather than separate indexes.
+
+**Groq for enrichment, not embeddings.** Groq serves no embedding models.
+Available and relevant: `qwen/qwen3.6-27b` (vision), `whisper-large-v3-turbo`
+(28,800 audio seconds per day), `openai/gpt-oss-120b` and `-20b`.
+
+---
+
+## 7. Hard-won lessons
+
+Each of these cost real time. Do not rediscover them.
+
+### Playwright and X
+
+1. **The GraphQL query ID changes on every X frontend deploy.** Match only the
+   trailing operation name (`Bookmarks`), never the full path.
+2. **Never make blocking calls inside a Playwright event handler** in the sync
+   API. Collect `Response` objects in the handler; read bodies in the main flow.
+3. **X throttles one session across concurrent browsers.** The first parallel
+   run returned 61 of 153 articles empty. Every one succeeded on a serial
+   retry. Articles now use `ARTICLE_WORKERS = 1`; links keep `WORKERS = 4`,
+   because they spread over hundreds of hosts.
+4. **Never scroll an X Article page.** The view mounts and unmounts surrounding
+   elements as you move, so scrolling makes extraction *worse* — measured at
+   542 words after two scrolls and 449 after four, against 478 with no scroll.
+   The GraphQL `content_state` is captured in parallel as the authoritative
+   copy and proves the render was complete.
+5. **`bypass_csp=True` is required.** GitHub otherwise blocks script injection.
+6. **Playwright's sync API is bound to its creating thread.** Each worker
+   thread must build its own `sync_playwright()`, browser, and DB connection.
+7. **Rewrite arXiv `/pdf/` to `/abs/`.** A PDF URL makes the browser start a
+   download instead of rendering. `looks_like_a_file()` guards the rest.
+8. **JavaScript apps can be empty at `domcontentloaded`.** Retry once on
+   `networkidle` before calling an extraction thin.
+
+### Everything else
+
+9. **`load_dotenv()` must take an explicit path.** `find_dotenv()` walks up
+   from the calling frame, which breaks for scripts run from stdin.
+10. **Defuddle returns HTML, not markdown**, even with `markdown: true`. That
+    is fine and deliberate: `documents.body` keeps HTML because the `<a href>`
+    and `<img src>` inside are what later layers need. Markup comes off at
+    chunk time in `chunk.to_text()`.
+11. **Schema changes: drop and rebuild, never migrate.** `CREATE TABLE IF NOT
+    EXISTS` will not add a column to an existing table, and the owner forbids
+    migrations. `raw_pages` makes rebuilding safe.
+12. **SQLite: `LIMIT` goes after `UNION ALL`.** Wrap each side in a subquery.
+13. **embeddinggemma uses asymmetric prefixes.** Documents get
+    `title: none | text: `, queries get `task: search result | query: `.
+    Using the wrong one is a real handicap. See `embed.py`.
+14. **Verify test expectations against real output before trusting them.** Two
+    early test failures were wrong expectations, not wrong code.
+15. **Cards name their target by t.co**, so resolve the short link. Guessing
+    which link a card belongs to attached cards to the wrong URL.
+16. **Store the smallest MP4, not the best.** Transcription wants speech, not
+    pixels. A 44.5-minute clip is 3.3 GB at top bitrate and 81 MB at 256 kbps.
+    Across 40 bookmarks this was 10.73 GB versus 0.27 GB, a 40x saving.
+
+---
+
+## 8. Your next task: the MCP server
+
+This is started but **not written**. The `mcp` package is installed. The
+`Hit` dataclass already carries everything the tools need.
+
+### Why three tools, not one
+
+Search returns **one passage per bookmark**, so a long thread cannot crowd out
+a sharp short post. That hides scale:
+
+| Chunks per bookmark | Bookmarks |
+| --- | --: |
+| 1 | 536 |
+| 2–3 | 434 |
+| 4–10 | 210 |
+| 11+ | 31 |
+
+The worst case is one bookmark whose linked Claude Code CHANGELOG is **78,729
+words in 155 chunks**. A caller sees 1 of 155. It needs a way to go deeper, and
+a way to know that deeper exists.
+
+### The tools
+
+1. **`search_bookmarks(query, limit=10, author=None, source=None)`**
+   Wraps `search.search()`. Return per hit: `tweet_id`, `url`, `author`,
+   `created_at`, `score`, `best_source`, `best_chunk` (the passage that
+   matched), `best_ref` (the page URL it came from), `chunk_count`,
+   `word_count`, `media`, `lang`.
+   `chunk_count` and `word_count` are what make tool 3 discoverable.
+
+2. **`get_bookmark(tweet_id)`**
+   Full post text, quoted post, author, date, every link, every media item.
+   Cheap and bounded. Do **not** include document bodies here.
+
+3. **`read_document(tweet_id_or_url, query=None, offset=0)`**
+   The extracted page text. **This one is dangerous if done naively**:
+   returning the CHANGELOG whole is roughly 100,000 tokens and would destroy
+   the caller's context. So:
+   - with `query`: run the same hybrid search **restricted to that document**
+     and return the best passages;
+   - without: page through with `offset` and return `has_more`.
+
+Use stdio transport. Add a `xbm-mcp` entry point in `[project.scripts]`.
+
+### After it works
+
+Register it and dogfood it. The owner asked for this explicitly:
+
+```bash
+claude mcp add x-bookmarks -- uv run --project ~/Developer/x-bookmarks-rag xbm-mcp
+```
+
+Then actually call the tools and fix what is awkward in practice.
+
+---
+
+## 9. Backlog after MCP
+
+In the owner's chosen order. Each layer must leave a working product.
+
+1. **Image captions and OCR.** 541 photos, only 10 with alt text, so this is
+   mandatory for image search. Groq `qwen/qwen3.6-27b`, 5 images per request.
+   `pbs.twimg.com` URLs are public, so pass URLs directly — no downloading.
+   Track state in the `enrichment` table.
+2. **Video transcripts.** 42 hours total. Split by length: 249 clips under 10
+   minutes go to Groq `whisper-large-v3-turbo` (free tier gives 28,800 audio
+   seconds per day, so the short set is about half of one day). The 45 long
+   clips run locally with `mlx-whisper`. Use `media.small_url`, never `url`.
+3. **Foreign language translation.** The owner asked for this explicitly.
+   Design: `chunks.text` holds English, `chunks.source_text` holds the
+   original. Both columns already exist. Note that the `zxx` language bucket is
+   mostly X Articles, not foreign text — genuine translation work is about 11
+   posts.
+4. **Web UI.** Over the same `search.search()` function.
+
+---
+
+## 10. How to verify your work
+
+- `uv run pytest -q` — 78 tests, all offline, under a second. Keep it that way.
+  Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
+  `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
+- Run a real query and read the passages:
+  `uv run xbm search "what was the article about kv caching"`.
+  A good result shows the matching passage and a `from <url>` line, not the
+  post text.
+- Never report a step as done without running it. The owner checks.
