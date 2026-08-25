@@ -17,7 +17,7 @@ def records() -> dict[str, dict]:
 
 
 def test_cursors_and_ads_are_skipped(records):
-    assert set(records) == {"1001", "1002", "1003"}
+    assert set(records) == {"1001", "1002", "1003", "1004"}
 
 
 def test_bottom_cursor_is_found():
@@ -146,3 +146,48 @@ def test_self_referencing_x_links_are_ignored():
         [{"url": "https://t.co/q", "expanded_url": "https://x.com/alice/status/5"}],
     )
     assert parse.extract_links(tweet) == []
+
+
+# --------------------------------------------------------------------------
+# Transcription downloads the smallest variant. A 44-minute clip is 3.3 GB at
+# the top bitrate and 81 MB at the bottom one, for the same speech.
+# --------------------------------------------------------------------------
+
+
+def test_smallest_mp4_is_kept_for_transcription(records):
+    video = records["1002"]["media"][0]
+    assert video["small_url"] == "https://video.twimg.com/low.mp4"
+    assert video["small_bitrate"] == 832_000
+    assert video["small_bitrate"] < video["bitrate"]
+
+
+def test_photos_have_no_small_variant(records):
+    assert records["1001"]["media"][0]["small_url"] is None
+
+
+def test_video_variants_ignores_hls_and_handles_empty():
+    assert parse.video_variants({"variants": []}) == (None, None, None, None)
+    assert parse.video_variants(
+        {"variants": [{"content_type": "application/x-mpegURL", "url": "x.m3u8"}]}
+    ) == (None, None, None, None)
+
+
+# --------------------------------------------------------------------------
+# X Articles arrive as a stub. The body needs a second visit.
+# --------------------------------------------------------------------------
+
+
+def test_article_stub_is_captured(records):
+    bookmark = records["1004"]["bookmark"]
+    assert bookmark["article_id"] == "77"
+    assert bookmark["article_title"] == "Step-By-Step LLM Engineering"
+    assert bookmark["article_preview"].startswith("At some point")
+
+
+def test_ordinary_posts_have_no_article_fields(records):
+    assert records["1001"]["bookmark"]["article_id"] is None
+
+
+def test_internal_x_article_link_is_not_a_link_row(records):
+    """The article is tracked by article_id, so its x.com URL is not a link."""
+    assert records["1004"]["links"] == []

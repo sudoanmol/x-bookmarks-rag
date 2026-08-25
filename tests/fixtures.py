@@ -141,6 +141,29 @@ LONG_TWEET = {
 }
 
 
+ARTICLE_TWEET = _tweet(
+    "1004",
+    _user("u5", "frank"),
+    {
+        "full_text": "New piece https://t.co/art",
+        "created_at": "Mon Feb 03 08:00:00 +0000 2025",
+        "lang": "en",
+        "conversation_id_str": "1004",
+        "entities": {"urls": [{"url": "https://t.co/art", "expanded_url": "https://x.com/i/article/77"}]},
+    },
+    article={
+        "article_results": {
+            "result": {
+                "rest_id": "77",
+                "title": "Step-By-Step LLM Engineering",
+                "preview_text": "At some point, reading about LLMs stops being enough.",
+                "metadata": {"first_published_at_secs": 1738569600},
+            }
+        }
+    },
+)
+
+
 def page() -> dict:
     return {
         "data": {
@@ -153,6 +176,7 @@ def page() -> dict:
                                 _entry("1800000000000000003", PHOTO_TWEET),
                                 _entry("1800000000000000002", VIDEO_TWEET),
                                 _entry("1800000000000000001", LONG_TWEET),
+                                _entry("1800000000000000004", ARTICLE_TWEET),
                                 {"entryId": "cursor-top-0", "sortIndex": "1800000000000000009",
                                  "content": {"entryType": "TimelineTimelineCursor", "cursorType": "Top", "value": "TOP"}},
                                 {"entryId": "cursor-bottom-0", "sortIndex": "1800000000000000000",

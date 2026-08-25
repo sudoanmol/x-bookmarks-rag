@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     bookmark_count  INTEGER NOT NULL DEFAULT 0,
     quoted_tweet_id TEXT,
     quoted_text     TEXT,
+    article_id      TEXT,
+    article_title   TEXT,
+    article_preview TEXT,
+    article_body    TEXT,
     conversation_id TEXT,
     url             TEXT NOT NULL,
     captured_at     TEXT NOT NULL,
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
 
 CREATE INDEX IF NOT EXISTS idx_bookmarks_sort  ON bookmarks(sort_index DESC);
 CREATE INDEX IF NOT EXISTS idx_bookmarks_alive ON bookmarks(removed_at);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_article ON bookmarks(article_id) WHERE article_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS media (
     media_key   TEXT PRIMARY KEY,
@@ -57,9 +62,11 @@ CREATE TABLE IF NOT EXISTS media (
     alt_text    TEXT,
     width       INTEGER,
     height      INTEGER,
-    duration_ms INTEGER,
-    bitrate     INTEGER,
-    position    INTEGER NOT NULL DEFAULT 0
+    duration_ms   INTEGER,
+    bitrate       INTEGER,
+    small_url     TEXT,
+    small_bitrate INTEGER,
+    position      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_tweet ON media(tweet_id);
@@ -165,13 +172,13 @@ def upsert_bookmark(conn: sqlite3.Connection, bm: dict) -> None:
         INSERT INTO bookmarks(
             tweet_id, sort_index, author_id, text, is_long, lang, created_at,
             favorite_count, retweet_count, reply_count, quote_count, bookmark_count,
-            quoted_tweet_id, quoted_text, conversation_id, url,
-            captured_at, last_seen_at, removed_at
+            quoted_tweet_id, quoted_text, article_id, article_title, article_preview,
+            conversation_id, url, captured_at, last_seen_at, removed_at
         ) VALUES(
             :tweet_id, :sort_index, :author_id, :text, :is_long, :lang, :created_at,
             :favorite_count, :retweet_count, :reply_count, :quote_count, :bookmark_count,
-            :quoted_tweet_id, :quoted_text, :conversation_id, :url,
-            :now, :now, NULL
+            :quoted_tweet_id, :quoted_text, :article_id, :article_title, :article_preview,
+            :conversation_id, :url, :now, :now, NULL
         )
         ON CONFLICT(tweet_id) DO UPDATE SET
             sort_index      = excluded.sort_index,
@@ -187,6 +194,9 @@ def upsert_bookmark(conn: sqlite3.Connection, bm: dict) -> None:
             bookmark_count  = excluded.bookmark_count,
             quoted_tweet_id = excluded.quoted_tweet_id,
             quoted_text     = excluded.quoted_text,
+            article_id      = excluded.article_id,
+            article_title   = excluded.article_title,
+            article_preview = excluded.article_preview,
             conversation_id = excluded.conversation_id,
             url             = excluded.url,
             last_seen_at    = excluded.last_seen_at,
@@ -201,9 +211,11 @@ def replace_media(conn: sqlite3.Connection, tweet_id: str, items: Iterable[dict]
     conn.executemany(
         """
         INSERT INTO media(media_key, tweet_id, kind, url, thumb_url, alt_text,
-                          width, height, duration_ms, bitrate, position)
+                          width, height, duration_ms, bitrate,
+                          small_url, small_bitrate, position)
         VALUES(:media_key, :tweet_id, :kind, :url, :thumb_url, :alt_text,
-               :width, :height, :duration_ms, :bitrate, :position)
+               :width, :height, :duration_ms, :bitrate,
+               :small_url, :small_bitrate, :position)
         ON CONFLICT(media_key) DO NOTHING
         """,
         list(items),

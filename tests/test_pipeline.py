@@ -32,13 +32,13 @@ def workspace(tmp_path, monkeypatch):
 
 def test_normalize_writes_every_table(workspace):
     result = normalize_mod.normalize()
-    assert (result.pages, result.bookmarks) == (1, 3)
+    assert (result.pages, result.bookmarks) == (1, 4)
     assert result.media == 2
-    assert result.seen_ids == {"1001", "1002", "1003"}
+    assert result.seen_ids == {"1001", "1002", "1003", "1004"}
 
     conn = db.connect()
-    assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 3
-    assert conn.execute("SELECT COUNT(*) FROM authors").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 4
+    assert conn.execute("SELECT COUNT(*) FROM authors").fetchone()[0] == 4
     assert conn.execute("SELECT COUNT(*) FROM media WHERE kind='video'").fetchone()[0] == 1
     conn.close()
 
@@ -47,7 +47,7 @@ def test_normalize_is_idempotent(workspace):
     normalize_mod.normalize()
     normalize_mod.normalize()
     conn = db.connect()
-    assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 4
     assert conn.execute("SELECT COUNT(*) FROM media").fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM links").fetchone()[0] == 2
     conn.close()
@@ -77,9 +77,9 @@ def test_soft_delete_hides_but_keeps_the_row(workspace):
     normalize_mod.normalize()
     conn = db.connect()
     removed = db.mark_removed(conn, {"1001", "1002"})
-    assert removed == 1
+    assert removed == 2
     assert conn.execute("SELECT COUNT(*) FROM bookmarks WHERE removed_at IS NULL").fetchone()[0] == 2
-    assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM bookmarks").fetchone()[0] == 4
     conn.close()
 
 
@@ -91,7 +91,7 @@ def test_re_bookmarking_clears_the_removal(workspace):
 
     normalize_mod.normalize()
     conn = db.connect()
-    assert conn.execute("SELECT COUNT(*) FROM bookmarks WHERE removed_at IS NULL").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM bookmarks WHERE removed_at IS NULL").fetchone()[0] == 4
     conn.close()
 
 
@@ -101,7 +101,7 @@ def test_report_counts_the_things_phase_two_needs(workspace):
     stats = inspect_mod.gather(conn)
     conn.close()
 
-    assert stats["total"] == 3
+    assert stats["total"] == 4
     assert stats["long_posts"] == 1
     assert stats["with_quote"] == 1
     assert stats["video_count"] == 1
@@ -109,8 +109,10 @@ def test_report_counts_the_things_phase_two_needs(workspace):
     assert stats["non_english"] == 1          # the Japanese post
     assert stats["link_total"] == 2
     assert stats["with_alt"] == 1
-    # 2_176_000 bits/s over 92s, in bytes
-    assert round(stats["video_bytes"]) == round(2_176_000 * 92 / 8)
+    assert stats["articles"] == 1
+    # the report estimates the download we would actually make: smallest variant
+    assert round(stats["video_bytes"]) == round(832_000 * 92 / 8)
+    assert round(stats["video_bytes_best"]) == round(2_176_000 * 92 / 8)
 
 
 def test_report_renders_without_error(workspace):

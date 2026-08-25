@@ -122,18 +122,23 @@ def extract_text(tweet: dict) -> tuple[str, bool]:
     return text.strip(), is_long
 
 
-def best_video_url(video_info: dict) -> tuple[str | None, int | None]:
-    """Pick the highest-bitrate MP4. HLS variants have no bitrate and need a
-    player, so they are ignored."""
+def video_variants(video_info: dict) -> tuple[str | None, int | None, str | None, int | None]:
+    """Return the best and the smallest MP4, as (url, bitrate) pairs.
+
+    Enrichment wants speech, not pixels. A 44-minute clip is 3.3 GB at the top
+    bitrate and 81 MB at the bottom one, and the audio track is the same. HLS
+    variants carry no bitrate and need a player, so they are ignored.
+    """
     variants = [
         v
         for v in (video_info.get("variants") or [])
         if v.get("content_type") == "video/mp4" and v.get("url")
     ]
     if not variants:
-        return None, None
-    best = max(variants, key=lambda v: v.get("bitrate") or 0)
-    return best["url"], best.get("bitrate")
+        return None, None, None, None
+    ranked = sorted(variants, key=lambda v: v.get("bitrate") or 0)
+    best, small = ranked[-1], ranked[0]
+    return best["url"], best.get("bitrate"), small["url"], small.get("bitrate")
 
 
 def extract_media(tweet: dict) -> list[dict]:
@@ -146,9 +151,10 @@ def extract_media(tweet: dict) -> list[dict]:
         thumb = media.get("media_url_https")
         url, bitrate, duration = thumb, None, None
 
+        small_url, small_bitrate = None, None
         if kind in ("video", "animated_gif"):
             info = media.get("video_info") or {}
-            url, bitrate = best_video_url(info)
+            url, bitrate, small_url, small_bitrate = video_variants(info)
             duration = info.get("duration_millis")
             if not url:
                 continue
@@ -165,6 +171,8 @@ def extract_media(tweet: dict) -> list[dict]:
                 "height": dig(media, "original_info", "height"),
                 "duration_ms": duration,
                 "bitrate": bitrate,
+                "small_url": small_url,
+                "small_bitrate": small_bitrate,
                 "position": position,
             }
         )
@@ -237,6 +245,23 @@ def extract_links(tweet: dict) -> list[dict]:
 # --------------------------------------------------------------------------
 
 
+def extract_article(tweet: dict) -> dict:
+    """Read the X Article stub.
+
+    The Bookmarks timeline carries the title, a short preview, and an id, but
+    not `content_state`, which holds the body. Fetching the body needs a second
+    visit to the post; `article_body` stays NULL until then.
+    """
+    article = dig(tweet, "article", "article_results", "result")
+    if not article:
+        return {"article_id": None, "article_title": None, "article_preview": None}
+    return {
+        "article_id": article.get("rest_id") or article.get("id"),
+        "article_title": article.get("title"),
+        "article_preview": article.get("preview_text"),
+    }
+
+
 def parse_entry(entry: dict) -> dict | None:
     """Convert one timeline entry into author / bookmark / media / link records.
 
@@ -278,6 +303,7 @@ def parse_entry(entry: dict) -> dict | None:
         "bookmark_count": legacy.get("bookmark_count") or 0,
         "quoted_tweet_id": quoted.get("rest_id") if quoted else None,
         "quoted_text": quoted_text,
+        **extract_article(tweet),
         "conversation_id": legacy.get("conversation_id_str"),
         "url": f"https://x.com/{screen_name}/status/{tweet_id}",
     }

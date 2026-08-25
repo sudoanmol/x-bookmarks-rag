@@ -92,7 +92,8 @@ def gather(conn: sqlite3.Connection) -> dict:
 
     videos = _rows(
         conn,
-        f"""SELECT m.duration_ms, m.bitrate FROM media m JOIN bookmarks b USING(tweet_id)
+        f"""SELECT m.duration_ms, m.bitrate, m.small_bitrate
+            FROM media m JOIN bookmarks b USING(tweet_id)
             WHERE b.{ALIVE} AND m.kind IN ('video', 'animated_gif') AND m.duration_ms > 0""",
     )
     durations = [r[0] / 1000 for r in videos]
@@ -100,8 +101,14 @@ def gather(conn: sqlite3.Connection) -> dict:
     stats["video_seconds"] = sum(durations)
     stats["video_median_s"] = median(durations) if durations else 0
     stats["video_max_s"] = max(durations) if durations else 0
-    stats["video_bytes"] = sum(
-        (r[1] or 0) * (r[0] / 1000) / 8 for r in videos
+    stats["video_bytes_best"] = sum((r[1] or 0) * (r[0] / 1000) / 8 for r in videos)
+    stats["video_bytes"] = sum((r[2] or r[1] or 0) * (r[0] / 1000) / 8 for r in videos)
+    stats["long_videos"] = sum(1 for d in durations if d > 600)
+
+    # Articles carry only a title and a short preview here. The body needs a
+    # second visit to each post.
+    stats["articles"] = _scalar(
+        conn, f"SELECT COUNT(*) FROM bookmarks WHERE {ALIVE} AND article_id IS NOT NULL"
     )
 
     # Links
@@ -167,6 +174,7 @@ def render(stats: dict, console: Console | None = None) -> None:
     text.add_row("Long posts (note_tweet)", f"{stats['long_posts']:,}")
     text.add_row("With a quoted post", f"{stats['with_quote']:,}")
     text.add_row("Empty text", f"{stats['empty_text']:,}")
+    text.add_row("X Articles (body not in payload)", f"{stats['articles']:,}")
     console.print(Panel(text, title="Text", border_style="cyan"))
 
     langs = Table(show_header=True, header_style="bold")
@@ -200,7 +208,12 @@ def render(stats: dict, console: Console | None = None) -> None:
         video.add_row("Total runtime", _fmt_duration(stats["video_seconds"]))
         video.add_row("Median clip", _fmt_duration(stats["video_median_s"]))
         video.add_row("Longest clip", _fmt_duration(stats["video_max_s"]))
-        video.add_row("Download at best bitrate", _fmt_bytes(stats["video_bytes"]))
+        video.add_row("Clips over 10 min", f"{stats['long_videos']:,}")
+        video.add_row("Download, smallest variant", _fmt_bytes(stats["video_bytes"]))
+        video.add_row(
+            "[dim]Download, best variant[/dim]",
+            f"[dim]{_fmt_bytes(stats['video_bytes_best'])} — never needed for speech[/dim]",
+        )
         video.add_row(
             "Groq free transcription",
             f"{quota_days:.2f} of one day's quota ({GROQ_AUDIO_SECONDS_PER_DAY:,}s/day)",
@@ -235,7 +248,8 @@ def render(stats: dict, console: Console | None = None) -> None:
         f"{photos:,} images ≈ {-(-photos // GROQ_IMAGES_PER_REQUEST):,} Groq vision requests",
     )
     work.add_row("Transcription", f"{_fmt_duration(stats['video_seconds'])} of audio")
-    work.add_row("Article fetches", f"{stats['link_total']:,} URLs")
+    work.add_row("Article fetches", f"{stats['link_total']:,} external URLs")
+    work.add_row("X Article bodies", f"{stats['articles']:,} second-pass visits")
     work.add_row("Translations", f"{stats['non_english']:,} posts")
     work.add_row("Groq key", "present" if config.GROQ_API_KEY else "[red]missing from .env[/red]")
     console.print(Panel(work, title="Phase 2 workload estimate", border_style="magenta"))
