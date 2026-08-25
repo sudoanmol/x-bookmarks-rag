@@ -39,6 +39,10 @@ class Hit:
     best_ref: str | None
     lang: str | None
     media: str | None
+    # How much of this bookmark the returned passage represents. A caller that
+    # cannot see this has no way to tell an answer from a fragment.
+    chunk_count: int
+    word_count: int
 
 
 def fts_query(text: str) -> str:
@@ -98,6 +102,9 @@ def search(
         SELECT c.id, c.tweet_id, c.source, c.text AS chunk_text, c.ref,
                b.url, b.text, b.created_at, b.lang,
                a.screen_name,
+               (SELECT COUNT(*) FROM chunks WHERE tweet_id = b.tweet_id) AS chunk_count,
+               (SELECT COALESCE(SUM(word_count), 0) FROM documents
+                 WHERE tweet_id = b.tweet_id) AS doc_words,
                (SELECT GROUP_CONCAT(DISTINCT kind) FROM media WHERE tweet_id = b.tweet_id) AS media
         FROM chunks c
         JOIN bookmarks b USING(tweet_id)
@@ -133,6 +140,8 @@ def search(
             best_ref=row["ref"],
             lang=row["lang"],
             media=row["media"],
+            chunk_count=row["chunk_count"],
+            word_count=row["doc_words"] or len((row["text"] or "").split()),
         )
         for score, row in ordered
     ]
