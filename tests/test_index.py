@@ -151,3 +151,50 @@ def test_a_bookmark_appears_once_however_many_chunks_match(indexed):
     hits = search_mod.search(indexed, "the", limit=20)
     ids = [h.tweet_id for h in hits]
     assert len(ids) == len(set(ids))
+
+
+# --------------------------------------------------------------------------
+# Extracted documents replace the stubs they came from.
+# --------------------------------------------------------------------------
+
+
+def test_html_becomes_prose_without_urls():
+    from x_bookmarks_rag import chunk as chunk_mod
+
+    html = '<main><p>Read <a href="https://example.com/x">the guide</a> now.</p>'
+    text = chunk_mod.to_text(html)
+    assert "the guide" in text
+    assert "example.com" not in text
+
+
+def test_blank_runs_collapse():
+    from x_bookmarks_rag import chunk as chunk_mod
+
+    assert "\n\n\n" not in chunk_mod.to_text("<p>a</p><br><br><br><p>b</p>")
+
+
+def test_article_stub_is_dropped_once_the_body_exists(indexed):
+    from x_bookmarks_rag import chunk as chunk_mod
+
+    row = indexed.execute(
+        "SELECT b.tweet_id, b.text, b.quoted_text, b.lang, b.article_title,"
+        " b.article_preview, a.screen_name FROM bookmarks b"
+        " LEFT JOIN authors a USING(author_id) WHERE b.article_title IS NOT NULL"
+    ).fetchone()
+    assert row is not None
+    with_stub = chunk_mod.chunks_for_row(row)
+    without = chunk_mod.chunks_for_row(row, skip_article=True)
+    assert any(c.source == "article" for c in with_stub)
+    assert not any(c.source == "article" for c in without)
+
+
+def test_a_card_is_dropped_when_its_page_was_extracted():
+    from x_bookmarks_rag import chunk as chunk_mod
+
+    rows = [
+        {"tweet_id": "1", "url": "https://www.example.com/a?utm_source=x",
+         "domain": "example.com", "title": "T", "description": "D"}
+    ]
+    assert chunk_mod.chunks_for_links(rows) != []
+    # The document was stored under the normalized URL.
+    assert chunk_mod.chunks_for_links(rows, covered={"https://example.com/a"}) == []

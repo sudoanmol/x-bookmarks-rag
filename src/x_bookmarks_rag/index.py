@@ -48,6 +48,15 @@ FROM bookmarks b LEFT JOIN authors a USING(author_id)
 WHERE b.removed_at IS NULL
 """
 
+DOCUMENT_SQL = """
+SELECT d.url, d.kind, d.tweet_id, d.title, d.body, d.lang, d.site,
+       a.screen_name
+FROM documents d
+JOIN bookmarks b ON b.tweet_id = d.tweet_id
+LEFT JOIN authors a USING(author_id)
+WHERE b.removed_at IS NULL AND d.body != '' AND d.word_count > 0
+"""
+
 LINK_SQL = """
 SELECT l.tweet_id, l.url, l.domain, l.title, l.description
 FROM links l JOIN bookmarks b USING(tweet_id)
@@ -71,11 +80,21 @@ def _hash(text: str) -> str:
 
 def _collect(conn: sqlite3.Connection) -> dict[str, list[chunk_mod.Chunk]]:
     by_tweet: dict[str, list[chunk_mod.Chunk]] = {}
+    documents = conn.execute(DOCUMENT_SQL).fetchall()
+    articled = {r["tweet_id"] for r in documents if r["kind"] == "x_article"}
+    covered = {r["url"] for r in documents if r["kind"] != "x_article"}
+
     for row in conn.execute(BOOKMARK_SQL):
-        pieces = chunk_mod.chunks_for_row(row)
+        pieces = chunk_mod.chunks_for_row(
+            row, skip_article=row["tweet_id"] in articled
+        )
         if pieces:
             by_tweet.setdefault(row["tweet_id"], []).extend(pieces)
-    for piece in chunk_mod.chunks_for_links(conn.execute(LINK_SQL).fetchall()):
+    for piece in chunk_mod.chunks_for_links(
+        conn.execute(LINK_SQL).fetchall(), covered=covered
+    ):
+        by_tweet.setdefault(piece.tweet_id, []).append(piece)
+    for piece in chunk_mod.chunks_for_documents(documents):
         by_tweet.setdefault(piece.tweet_id, []).append(piece)
     return by_tweet
 

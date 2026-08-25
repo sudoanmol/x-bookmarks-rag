@@ -21,40 +21,6 @@ BUNDLE = Path(__file__).parent / "vendor" / "defuddle.bundle.js"
 # Below this, an extraction is treated as failed rather than stored as content.
 THIN_WORDS = 60
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS documents (
-    url         TEXT PRIMARY KEY,
-    kind        TEXT NOT NULL,
-    depth       INTEGER NOT NULL DEFAULT 0,
-    tweet_id    TEXT,
-    title       TEXT,
-    author      TEXT,
-    site        TEXT,
-    published   TEXT,
-    body        TEXT,
-    word_count  INTEGER NOT NULL DEFAULT 0,
-    lang        TEXT,
-    fetched_at  TEXT,
-    attempts    INTEGER NOT NULL DEFAULT 0,
-    error       TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_documents_tweet ON documents(tweet_id);
-CREATE INDEX IF NOT EXISTS idx_documents_depth ON documents(depth);
-
-CREATE TABLE IF NOT EXISTS enrichment (
-    kind       TEXT NOT NULL,
-    ref        TEXT NOT NULL,
-    state      TEXT NOT NULL DEFAULT 'pending',
-    attempts   INTEGER NOT NULL DEFAULT 0,
-    provider   TEXT,
-    error      TEXT,
-    updated_at TEXT,
-    PRIMARY KEY (kind, ref)
-);
-
-CREATE INDEX IF NOT EXISTS idx_enrichment_state ON enrichment(kind, state);
-"""
 
 # Defuddle runs against `document`, so the page must already be rendered.
 PARSE_JS = """(url) => {
@@ -146,9 +112,7 @@ def article_text(payload: dict) -> str:
 
 
 def connect() -> sqlite3.Connection:
-    conn = db.connect()
-    conn.executescript(SCHEMA)
-    return conn
+    return db.connect()
 
 
 def extract_one(page, url: str, *, kind: str, tweet_id: str | None = None, depth: int = 0) -> Document:

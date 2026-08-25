@@ -96,6 +96,39 @@ CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS documents (
+    url         TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    depth       INTEGER NOT NULL DEFAULT 0,
+    tweet_id    TEXT,
+    title       TEXT,
+    author      TEXT,
+    site        TEXT,
+    published   TEXT,
+    body        TEXT,
+    word_count  INTEGER NOT NULL DEFAULT 0,
+    lang        TEXT,
+    fetched_at  TEXT,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    error       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_documents_tweet ON documents(tweet_id);
+CREATE INDEX IF NOT EXISTS idx_documents_depth ON documents(depth);
+
+CREATE TABLE IF NOT EXISTS enrichment (
+    kind       TEXT NOT NULL,
+    ref        TEXT NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'pending',
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    provider   TEXT,
+    error      TEXT,
+    updated_at TEXT,
+    PRIMARY KEY (kind, ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_enrichment_state ON enrichment(kind, state);
 """
 
 
