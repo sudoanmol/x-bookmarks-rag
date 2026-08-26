@@ -56,7 +56,7 @@ uv run xbm extract    # fetch full text behind articles and links
 uv run xbm index      # chunk and embed  (--rebuild to redo everything)
 uv run xbm search "..."  # hybrid search  (-n, --author, --source)
 
-uv run pytest -q      # 78 tests, all offline, ~0.6s
+uv run pytest -q      # 85 tests, all offline, ~1s
 ```
 
 Ollama must be running, with `embeddinggemma` pulled. That is the only model
@@ -95,6 +95,7 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
 | `embed.py` | Ollama calls. Asymmetric prefixes (see §8). |
 | `index.py` | Builds `chunks`, `chunk_vec`, `chunk_fts`. Owns the vec0 connection. |
 | `search.py` | Hybrid retrieval with reciprocal rank fusion. |
+| `mcp_server.py` | Stdio MCP tools for search, bookmark details, and document reading. |
 | `inspect.py` | The gate report that drives build decisions. |
 | `cli.py` | Typer entry point. |
 
@@ -143,7 +144,7 @@ Two design points worth keeping:
 | Links (unique) | 544 |
 | Documents | 693 stored, **670 usable** |
 | Extracted words | **1,087,352** |
-| Chunks / vectors | 3,437 / 3,437 |
+| Chunks / vectors | 3,373 / 3,373 |
 | Video | 42.0 hours: 249 clips under 10 min, 45 over |
 
 Layers 1 and 2 are done and working. Search returns real passages from
@@ -243,10 +244,10 @@ Each of these cost real time. Do not rediscover them.
 
 ---
 
-## 8. Your next task: the MCP server
+## 8. MCP server
 
-This is started but **not written**. The `mcp` package is installed. The
-`Hit` dataclass already carries everything the tools need.
+This is done. `mcp_server.py` uses MCP 2.0 and stdio transport. Codex has the
+server registered as `x-bookmarks`.
 
 ### Why three tools, not one
 
@@ -287,15 +288,16 @@ a way to know that deeper exists.
 
 Use stdio transport. Add a `xbm-mcp` entry point in `[project.scripts]`.
 
-### After it works
+### Registration
 
-Register it and dogfood it. The owner asked for this explicitly:
+Codex uses this global registration:
 
 ```bash
-claude mcp add x-bookmarks -- uv run --project ~/Developer/x-bookmarks-rag xbm-mcp
+codex mcp add x-bookmarks -- uv run --project ~/Developer/x-bookmarks-rag xbm-mcp
 ```
 
-Then actually call the tools and fix what is awkward in practice.
+The server was tested through an MCP stdio client. All three tools returned
+structured results against the live corpus.
 
 ---
 
@@ -322,7 +324,7 @@ In the owner's chosen order. Each layer must leave a working product.
 
 ## 10. How to verify your work
 
-- `uv run pytest -q` — 78 tests, all offline, under a second. Keep it that way.
+- `uv run pytest -q` — 85 tests, all offline, about one second. Keep it that way.
   Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
   `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
 - Run a real query and read the passages:

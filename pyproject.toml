@@ -30,3 +30,4 @@ dev = [
 
 [project.scripts]
 xbm = "x_bookmarks_rag.cli:app"
+xbm-mcp = "x_bookmarks_rag.mcp_server:main"

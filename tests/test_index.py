@@ -65,6 +65,12 @@ def test_a_single_unbroken_paragraph_is_still_split():
     assert all(len(p) <= chunk_mod.MAX_CHARS for p in pieces)
 
 
+def test_a_short_heading_stays_with_the_start_of_a_long_body():
+    pieces = chunk_mod.split_long("Heading\n\n" + "body " * chunk_mod.MAX_CHARS)
+    assert pieces[0].startswith("Heading\n\nbody")
+    assert len(pieces[0]) == chunk_mod.MAX_CHARS
+
+
 # --------------------------------------------------------------------------
 # index
 # --------------------------------------------------------------------------

@@ -45,6 +45,16 @@ class Hit:
     word_count: int
 
 
+@dataclass
+class ChunkHit:
+    chunk_id: int
+    source: str
+    ref: str | None
+    position: int
+    text: str
+    score: float
+
+
 def fts_query(text: str) -> str:
     """FTS5 has its own syntax; user input must not reach it raw.
 
@@ -55,27 +65,64 @@ def fts_query(text: str) -> str:
     return " OR ".join(f'"{t}"' for t in tokens)
 
 
-def _vector_ranks(conn: sqlite3.Connection, query: str, k: int) -> dict[int, int]:
+def _vector_ranks(
+    conn: sqlite3.Connection,
+    query: str,
+    k: int,
+    chunk_ids: set[int] | None = None,
+) -> dict[int, int]:
+    if chunk_ids is not None and not chunk_ids:
+        return {}
+
     vector = sqlite_vec.serialize_float32(embed.embed_query(query))
+    params: list[object] = [vector, min(k, len(chunk_ids)) if chunk_ids is not None else k]
+    restriction = ""
+    if chunk_ids is not None:
+        placeholders = ",".join("?" for _ in chunk_ids)
+        restriction = f" AND chunk_id IN ({placeholders})"
+        params.extend(sorted(chunk_ids))
     rows = conn.execute(
-        "SELECT chunk_id FROM chunk_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-        (vector, k),
+        "SELECT chunk_id FROM chunk_vec WHERE embedding MATCH ? AND k = ?"
+        f"{restriction} ORDER BY distance",
+        params,
     ).fetchall()
     return {row["chunk_id"]: rank for rank, row in enumerate(rows)}
 
 
-def _lexical_ranks(conn: sqlite3.Connection, query: str, k: int) -> dict[int, int]:
+def _lexical_ranks(
+    conn: sqlite3.Connection,
+    query: str,
+    k: int,
+    chunk_ids: set[int] | None = None,
+) -> dict[int, int]:
     match = fts_query(query)
-    if not match:
+    if not match or (chunk_ids is not None and not chunk_ids):
         return {}
+
+    params: list[object] = [match]
+    restriction = ""
+    if chunk_ids is not None:
+        placeholders = ",".join("?" for _ in chunk_ids)
+        restriction = f" AND rowid IN ({placeholders})"
+        params.extend(sorted(chunk_ids))
+    params.append(min(k, len(chunk_ids)) if chunk_ids is not None else k)
     try:
         rows = conn.execute(
-            "SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ? ORDER BY rank LIMIT ?",
-            (match, k),
+            "SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?"
+            f"{restriction} ORDER BY rank LIMIT ?",
+            params,
         ).fetchall()
     except sqlite3.OperationalError:
         return {}
     return {row["rowid"]: rank for rank, row in enumerate(rows)}
+
+
+def _fuse(dense: dict[int, int], lexical: dict[int, int]) -> dict[int, float]:
+    fused: dict[int, float] = {}
+    for ranks in (dense, lexical):
+        for chunk_id, rank in ranks.items():
+            fused[chunk_id] = fused.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank + 1)
+    return fused
 
 
 def search(
@@ -89,10 +136,7 @@ def search(
     dense = _vector_ranks(conn, query, CANDIDATES)
     lexical = _lexical_ranks(conn, query, CANDIDATES)
 
-    fused: dict[int, float] = {}
-    for ranks in (dense, lexical):
-        for chunk_id, rank in ranks.items():
-            fused[chunk_id] = fused.get(chunk_id, 0.0) + 1.0 / (RRF_K + rank + 1)
+    fused = _fuse(dense, lexical)
     if not fused:
         return []
 
@@ -144,4 +188,38 @@ def search(
             word_count=row["doc_words"] or len((row["text"] or "").split()),
         )
         for score, row in ordered
+    ]
+
+
+def search_chunks(
+    conn: sqlite3.Connection,
+    query: str,
+    chunk_ids: set[int],
+    *,
+    limit: int = 5,
+) -> list[ChunkHit]:
+    """Run hybrid search only over the selected chunks."""
+    dense = _vector_ranks(conn, query, CANDIDATES, chunk_ids)
+    lexical = _lexical_ranks(conn, query, CANDIDATES, chunk_ids)
+    fused = _fuse(dense, lexical)
+    if not fused:
+        return []
+
+    selected = sorted(fused, key=fused.get, reverse=True)[:limit]
+    placeholders = ",".join("?" for _ in selected)
+    rows = conn.execute(
+        f"SELECT id, source, ref, position, text FROM chunks WHERE id IN ({placeholders})",
+        selected,
+    ).fetchall()
+    by_id = {row["id"]: row for row in rows}
+    return [
+        ChunkHit(
+            chunk_id=chunk_id,
+            source=by_id[chunk_id]["source"],
+            ref=by_id[chunk_id]["ref"],
+            position=by_id[chunk_id]["position"],
+            text=by_id[chunk_id]["text"],
+            score=fused[chunk_id],
+        )
+        for chunk_id in selected
     ]

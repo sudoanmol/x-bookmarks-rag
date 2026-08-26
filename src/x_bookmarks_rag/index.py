@@ -13,6 +13,7 @@ from typing import Callable
 import sqlite_vec
 
 from . import chunk as chunk_mod
+from .extract import THIN_WORDS
 from . import db, embed
 
 SCHEMA = f"""
@@ -48,13 +49,13 @@ FROM bookmarks b LEFT JOIN authors a USING(author_id)
 WHERE b.removed_at IS NULL
 """
 
-DOCUMENT_SQL = """
+DOCUMENT_SQL = f"""
 SELECT d.url, d.kind, d.tweet_id, d.title, d.body, d.lang, d.site,
        a.screen_name
 FROM documents d
 JOIN bookmarks b ON b.tweet_id = d.tweet_id
 LEFT JOIN authors a USING(author_id)
-WHERE b.removed_at IS NULL AND d.body != '' AND d.word_count > 0
+WHERE b.removed_at IS NULL AND d.word_count >= {THIN_WORDS}
 """
 
 LINK_SQL = """

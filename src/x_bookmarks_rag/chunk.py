@@ -45,7 +45,12 @@ def split_long(text: str) -> list[str]:
             buffer = f"{buffer}\n\n{paragraph}" if buffer else paragraph
             continue
         if buffer:
-            parts.append(buffer)
+            room = MAX_CHARS - len(buffer) - 2
+            if room > 0:
+                parts.append(f"{buffer}\n\n{paragraph[:room]}")
+                paragraph = paragraph[max(0, room - OVERLAP_CHARS) :]
+            else:
+                parts.append(buffer)
         while len(paragraph) > MAX_CHARS:
             parts.append(paragraph[:MAX_CHARS])
             paragraph = paragraph[MAX_CHARS - OVERLAP_CHARS :]
