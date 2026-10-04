@@ -19,7 +19,9 @@ from . import db
 MODEL = "Qwen/Qwen3.8-27B-FP8"
 MAX_TOKENS = 2048
 BATCH = 64
-MAX_ATTEMPTS = 2
+# vLLM takes 5 to 8 minutes to start on the H100, the same for 1 photo as for
+# 600. `xbm sync` waits until this many photos are new; `xbm caption` does not.
+SYNC_MIN_PHOTOS = 20
 
 PROMPT = (
     "Transcribe every word visible in the image, preserving line breaks "
@@ -154,18 +156,15 @@ def parse_caption(raw: str) -> str:
 
 
 def pending(conn: sqlite3.Connection, *, retry_failed: bool = False) -> list[Job]:
-    """Photos still worth captioning. Videos and gifs are a later layer."""
-    done: dict[str, int] = {}
-    for row in conn.execute("SELECT media_key, error, attempts FROM captions"):
-        done[row["media_key"]] = -1 if not row["error"] else row["attempts"]
+    """Photos never captioned, plus failed ones when asked.
+
+    A failure is not retried on its own: each run starts a GPU, and the usual
+    failure is a photo deleted at X, which fails again.
+    """
+    failed = {r["media_key"]: bool(r["error"]) for r in conn.execute("SELECT media_key, error FROM captions")}
 
     def wanted(key: str) -> bool:
-        attempts = done.get(key)
-        if attempts is None:
-            return True
-        if attempts < 0:
-            return False
-        return retry_failed or attempts < MAX_ATTEMPTS
+        return key not in failed or (retry_failed and failed[key])
 
     jobs: list[Job] = []
     for row in conn.execute(

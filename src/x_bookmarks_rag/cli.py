@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import typer
 from playwright.sync_api import sync_playwright
 from rich.console import Console
@@ -14,13 +17,13 @@ from . import search as search_mod
 
 app = typer.Typer(
     add_completion=False,
-    help="Capture, normalize, and inspect your X bookmarks.",
+    help="Search your X bookmarks in natural language.",
     no_args_is_help=True,
 )
 console = Console()
 
 
-@app.command()
+@app.command(rich_help_panel="Setup")
 def login() -> None:
     """Open a browser, sign in to X by hand, and save the session."""
     console.print("[cyan]Opening a browser. Sign in to X, then leave the window alone.[/cyan]")
@@ -33,12 +36,7 @@ def login() -> None:
     console.print(f"[green]Session saved to {config.STATE_PATH} (mode 0600).[/green]")
 
 
-@app.command()
-def sync(
-    full: bool = typer.Option(False, "--full", help="Walk every bookmark and detect removals."),
-    max_pages: int = typer.Option(0, "--max-pages", help="Stop after N pages. 0 means no limit."),
-    headed: bool = typer.Option(False, "--headed", help="Show the browser window."),
-) -> None:
+def _capture(full: bool, max_pages: int, headed: bool) -> None:
     """Capture new bookmarks, then load them into the database."""
     if not session.session_exists():
         console.print("[red]No saved session. Run `xbm login` first.[/red]")
@@ -98,7 +96,91 @@ def sync(
     conn.close()
 
 
-@app.command()
+# Each flag skips its stage and keeps that content out of the index, on top
+# of what config.toml already excludes. A flag holds for one run.
+NoArticles = typer.Option(False, "--no-articles", help="Leave out X Articles.")
+NoLinks = typer.Option(False, "--no-links", help="Leave out linked pages and link cards.")
+NoImages = typer.Option(False, "--no-images", help="Leave out photo captions and OCR.")
+NoVideos = typer.Option(False, "--no-videos", help="Leave out video transcripts.")
+NoQuotes = typer.Option(False, "--no-quotes", help="Leave out quoted posts.")
+NoTranslate = typer.Option(False, "--no-translate", help="Index foreign text untranslated.")
+
+
+def _resolve(
+    articles: bool, links: bool, images: bool, videos: bool, quotes: bool, no_translate: bool
+) -> tuple[frozenset[str], bool]:
+    """Merge config.toml with this run's flags into (exclude, translate)."""
+    try:
+        saved = config.settings()
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    flags = {"article": articles, "link": links, "image": images, "video": videos, "quote": quotes}
+    exclude = saved.exclude | {source for source, skip in flags.items() if skip}
+    translate = saved.translate and not no_translate
+    if exclude or not translate:
+        left_out = sorted(exclude) + ([] if translate else ["translation"])
+        console.print(f"[dim]Leaving out: {', '.join(left_out)}[/dim]")
+    return frozenset(exclude), translate
+
+
+@app.command(rich_help_panel="Daily")
+def sync(
+    full: bool = typer.Option(False, "--full", help="Walk every bookmark and detect removals."),
+    max_pages: int = typer.Option(0, "--max-pages", help="Stop after N pages. 0 means no limit."),
+    headed: bool = typer.Option(False, "--headed", help="Show the browser window."),
+    no_articles: bool = NoArticles,
+    no_links: bool = NoLinks,
+    no_images: bool = NoImages,
+    no_videos: bool = NoVideos,
+    no_quotes: bool = NoQuotes,
+    no_translate: bool = NoTranslate,
+) -> None:
+    """Capture new bookmarks, enrich them, and update the index.
+
+    Runs capture, extract, caption, transcribe, translate, and index. Every
+    stage handles only what is new. A failed stage does not stop the rest, so
+    new posts still reach the index; the run exits non-zero at the end.
+    """
+    exclude, translate = _resolve(
+        no_articles, no_links, no_images, no_videos, no_quotes, no_translate
+    )
+    kinds = {k for k, source in (("x_article", "article"), ("link", "link")) if source not in exclude}
+    stages = [
+        ("capture", lambda: _capture(full, max_pages, headed)),
+        ("extract", lambda: _extract(kinds), bool(kinds)),
+        ("caption", lambda: _caption(wait_for_batch=True), "image" not in exclude),
+        ("transcribe", _transcribe, "video" not in exclude),
+        ("translate", lambda: _translate(exclude), translate),
+        ("index", lambda: _index(exclude=exclude, translated=translate)),
+    ]
+    failed = []
+    for name, run, *enabled in stages:
+        if enabled and not enabled[0]:
+            continue
+        console.rule(f"[bold]{name}", align="left")
+        try:
+            run()
+        except Exception as exc:  # typer.Exit included: one stage must not sink the rest
+            if not isinstance(exc, typer.Exit):
+                console.print(f"[red]{name} failed: {type(exc).__name__}: {exc}[/red]")
+            failed.append(name)
+    if failed:
+        console.print(f"[red]Failed stages: {', '.join(failed)}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command(rich_help_panel="Pipeline stages")
+def capture(
+    full: bool = typer.Option(False, "--full", help="Walk every bookmark and detect removals."),
+    max_pages: int = typer.Option(0, "--max-pages", help="Stop after N pages. 0 means no limit."),
+    headed: bool = typer.Option(False, "--headed", help="Show the browser window."),
+) -> None:
+    """Capture new bookmarks only. No enrichment, no index."""
+    _capture(full, max_pages, headed)
+
+
+@app.command(rich_help_panel="Maintenance")
 def normalize() -> None:
     """Rebuild the database from every raw page already on disk."""
     result = normalize_mod.normalize()
@@ -110,7 +192,7 @@ def normalize() -> None:
         console.print(f"[red]Unreadable: {path}[/red]")
 
 
-@app.command()
+@app.command(rich_help_panel="Maintenance")
 def inspect() -> None:
     """Report what the captured data actually contains."""
     conn = db.connect()
@@ -122,42 +204,68 @@ def inspect() -> None:
     inspect_mod.render(stats, console)
 
 
-@app.command()
+@app.command(rich_help_panel="Daily")
 def status() -> None:
-    """Show session and sync state."""
-    conn = db.connect()
-    console.print(f"Session file : {config.STATE_PATH} "
-                  f"{'[green]present[/green]' if session.session_exists() else '[red]missing[/red]'}")
-    console.print(f"Database     : {config.DB_PATH}")
-    console.print(f"Raw pages    : {config.RAW_DIR}")
-    alive = conn.execute("SELECT COUNT(*) FROM bookmarks WHERE removed_at IS NULL").fetchone()[0]
-    console.print(f"Bookmarks    : {alive}")
-    console.print(f"Watermark    : {db.get_watermark(conn) or 'not set'}")
-    console.print(f"Last sync    : {db.get_state(conn, 'last_sync_at') or 'never'}")
-    console.print(f"Groq key     : {'[green]set[/green]' if config.GROQ_API_KEY else '[red]missing[/red]'}")
-    photos = conn.execute(
-        "SELECT COUNT(*) FROM media m JOIN bookmarks b USING(tweet_id) "
-        "WHERE b.removed_at IS NULL AND m.kind = 'photo'"
-    ).fetchone()[0]
-    captioned = conn.execute(
-        "SELECT COUNT(*) FROM captions WHERE error IS NULL AND text != ''"
-    ).fetchone()[0]
-    failed = conn.execute(
-        "SELECT COUNT(*) FROM captions WHERE error IS NOT NULL"
-    ).fetchone()[0]
-    extra = f"  [red]{failed} failed[/red]" if failed else ""
-    console.print(f"Captions     : {captioned}/{photos}{extra}")
+    """Show what is captured, enriched, and indexed, and what each stage needs."""
+    import httpx
+
+    def ok(flag: bool, yes: str = "ready", no: str = "missing") -> str:
+        return f"[green]{yes}[/green]" if flag else f"[red]{no}[/red]"
+
+    def count(sql: str) -> int:
+        return conn.execute(sql).fetchone()[0]
+
+    conn = index_mod.connect()
+    live = "JOIN bookmarks b USING(tweet_id) WHERE b.removed_at IS NULL"
+    bookmarks = count("SELECT COUNT(*) FROM bookmarks WHERE removed_at IS NULL")
+    photos = count(f"SELECT COUNT(*) FROM media m {live} AND m.kind = 'photo'")
+    videos = count(f"SELECT COUNT(*) FROM media m {live} AND m.kind = 'video'")
+    captioned = count("SELECT COUNT(*) FROM captions WHERE error IS NULL AND text != ''")
+    transcribed = count("SELECT COUNT(*) FROM documents WHERE kind = 'video' AND error IS NULL")
+    speech = count("SELECT COUNT(*) FROM documents WHERE kind = 'video' AND word_count > 0")
+    pages = count(f"SELECT COUNT(*) FROM documents d WHERE kind != 'video' AND {extract_mod.READABLE_SQL}")
+    failed_pages = count("SELECT COUNT(*) FROM documents WHERE kind != 'video' AND error IS NOT NULL")
+    translated = count("SELECT COUNT(*) FROM translations WHERE text IS NOT NULL")
+    chunks = count("SELECT COUNT(*) FROM chunks")
+    embedded = count("SELECT COUNT(*) FROM chunk_vec")
+    last_sync = db.get_state(conn, "last_sync_at")
     conn.close()
 
+    try:
+        saved = config.settings()
+        excluded = ", ".join(sorted(saved.exclude)) or "nothing"
+        if not saved.translate:
+            excluded += " (translation off)"
+    except ValueError as exc:
+        excluded = f"[red]{exc}[/red]"
+    try:
+        tags = httpx.get("http://127.0.0.1:11434/api/tags", timeout=2).json()["models"]
+        ollama = ok(any(m["name"].startswith("embeddinggemma") for m in tags), no="embeddinggemma not pulled")
+    except Exception:
+        ollama = ok(False, no="not running")
+    modal_ready = (Path.home() / ".modal.toml").exists() or bool(os.environ.get("MODAL_TOKEN_ID"))
 
-@app.command()
-def extract(
-    limit: int = typer.Option(None, "--limit", "-n", help="Stop after this many documents."),
-    retry: bool = typer.Option(False, "--retry", help="Try the failed URLs again."),
-) -> None:
-    """Fetch the full text behind articles and links."""
+    rows = [
+        ("Bookmarks", f"{bookmarks:,}  [dim]last sync {last_sync or 'never'}[/dim]"),
+        ("Pages", f"{pages:,} readable  [dim]{failed_pages:,} failed[/dim]"),
+        ("Captions", f"{captioned:,} / {photos:,} photos"),
+        ("Transcripts", f"{transcribed:,} / {videos:,} videos  [dim]{speech:,} with speech[/dim]"),
+        ("Translations", f"{translated:,} chunks"),
+        ("Index", f"{embedded:,} / {chunks:,} chunks embedded"),
+        ("Excluded", f"{excluded}  [dim]{config.SETTINGS_PATH}[/dim]"),
+        ("", ""),
+        ("X session", ok(session.session_exists(), "present") + f"  [dim]{config.STATE_PATH}[/dim]"),
+        ("Ollama", ollama + "  [dim]index, search[/dim]"),
+        ("Modal", ok(modal_ready, no="run `modal setup`") + "  [dim]caption, transcribe[/dim]"),
+        ("Groq key", ok(bool(config.GROQ_API_KEY)) + "  [dim]translate[/dim]"),
+    ]
+    for label, value in rows:
+        console.print(f"{label:<13}{value}" if label else "")
+
+
+def _extract(kinds: set[str], limit: int | None = None, retry: bool = False) -> None:
     conn = extract_mod.connect()
-    jobs = extract_mod.pending(conn, retry_failed=retry)
+    jobs = [j for j in extract_mod.pending(conn, retry_failed=retry) if j.kind in kinds]
     if limit:
         jobs = jobs[:limit]
     if not jobs:
@@ -177,12 +285,7 @@ def extract(
     console.print(f"[green]{tally['ok']:,} extracted[/green] [dim]{tally['failed']:,} failed[/dim]")
 
 
-@app.command()
-def caption(
-    limit: int = typer.Option(None, "--limit", "-n", help="Stop after this many images."),
-    retry: bool = typer.Option(False, "--retry", help="Try the failed images again."),
-) -> None:
-    """Caption bookmark photos with a vision model on a Modal GPU."""
+def _caption(limit: int | None = None, retry: bool = False, wait_for_batch: bool = False) -> None:
     from . import caption as caption_mod
 
     conn = db.connect()
@@ -192,8 +295,15 @@ def caption(
     if not jobs:
         console.print("[green]Every photo is captioned.[/green]")
         return
+    if wait_for_batch and len(jobs) < caption_mod.SYNC_MIN_PHOTOS:
+        console.print(
+            f"[dim]{len(jobs)} new photos wait for {caption_mod.SYNC_MIN_PHOTOS} before a GPU starts. "
+            "Run `xbm caption` to caption them now.[/dim]"
+        )
+        return
 
     console.print(f"[dim]{len(jobs)} photos[/dim]")
+
     # Plain lines, not a status spinner: Modal draws its own live output.
     def on_progress(done: int, total: int, cap) -> None:
         if cap.error:
@@ -206,12 +316,7 @@ def caption(
     console.print(f"[green]{tally['ok']:,} captioned[/green] [dim]{tally['failed']:,} failed[/dim]")
 
 
-@app.command()
-def transcribe(
-    limit: int = typer.Option(None, "--limit", "-n", help="Stop after this many videos."),
-    retry: bool = typer.Option(False, "--retry", help="Try the failed videos again."),
-) -> None:
-    """Transcribe bookmark videos with Whisper on Modal GPUs."""
+def _transcribe(limit: int | None = None, retry: bool = False) -> None:
     from . import transcribe as transcribe_mod
 
     conn = db.connect()
@@ -239,17 +344,15 @@ def transcribe(
     )
 
 
-@app.command()
-def translate() -> None:
-    """Translate foreign chunks into English with Groq. Run `xbm index` after."""
+def _translate(exclude: frozenset[str] = frozenset()) -> None:
     from . import translate as translate_mod
 
     if not config.GROQ_API_KEY:
-        console.print("[red]GROQ_API_KEY is missing from .env[/red]")
-        raise typer.Exit(1)
+        console.print("[yellow]GROQ_API_KEY is missing from .env, so nothing was translated.[/yellow]")
+        return
 
     conn = db.connect()
-    jobs = translate_mod.pending(conn)
+    jobs = translate_mod.pending(conn, exclude=exclude)
     if not jobs:
         console.print("[green]Nothing new to translate.[/green]")
         return
@@ -268,17 +371,15 @@ def translate() -> None:
     )
 
 
-@app.command()
-def index(
-    rebuild: bool = typer.Option(False, "--rebuild", help="Discard chunks and embed everything again."),
-) -> None:
-    """Chunk and embed the captured bookmarks."""
+def _index(rebuild: bool = False, exclude: frozenset[str] = frozenset(), translated: bool = True) -> None:
     conn = index_mod.connect()
     with console.status("Indexing...") as status:
         def on_progress(stage: str, done: int, total: int) -> None:
             status.update(f"{stage}: {done}/{total}")
 
-        stats = index_mod.build(conn, rebuild=rebuild, on_progress=on_progress)
+        stats = index_mod.build(
+            conn, rebuild=rebuild, exclude=exclude, translated=translated, on_progress=on_progress
+        )
     conn.close()
     console.print(
         f"[green]{stats['chunks']:,} chunks, {stats['embedded']:,} embedded[/green] "
@@ -286,7 +387,52 @@ def index(
     )
 
 
-@app.command()
+Limit = typer.Option(None, "--limit", "-n", help="Stop after this many items.")
+Retry = typer.Option(False, "--retry", help="Try the failed items again.")
+
+
+@app.command(rich_help_panel="Pipeline stages")
+def extract(limit: int = Limit, retry: bool = Retry) -> None:
+    """Fetch the full text behind articles and links."""
+    _extract({"x_article", "link"}, limit, retry)
+
+
+@app.command(rich_help_panel="Pipeline stages")
+def caption(limit: int = Limit, retry: bool = Retry) -> None:
+    """Caption bookmark photos with a vision model on a Modal GPU."""
+    _caption(limit, retry)
+
+
+@app.command(rich_help_panel="Pipeline stages")
+def transcribe(limit: int = Limit, retry: bool = Retry) -> None:
+    """Transcribe bookmark videos with Whisper on Modal GPUs."""
+    _transcribe(limit, retry)
+
+
+@app.command(rich_help_panel="Pipeline stages")
+def translate() -> None:
+    """Translate foreign chunks into English with Groq. Run `xbm index` after."""
+    _translate(_resolve(False, False, False, False, False, False)[0])
+
+
+@app.command(rich_help_panel="Pipeline stages")
+def index(
+    rebuild: bool = typer.Option(False, "--rebuild", help="Discard chunks and embed everything again."),
+    no_articles: bool = NoArticles,
+    no_links: bool = NoLinks,
+    no_images: bool = NoImages,
+    no_videos: bool = NoVideos,
+    no_quotes: bool = NoQuotes,
+    no_translate: bool = NoTranslate,
+) -> None:
+    """Chunk and embed the captured bookmarks."""
+    exclude, translate = _resolve(
+        no_articles, no_links, no_images, no_videos, no_quotes, no_translate
+    )
+    _index(rebuild, exclude, translated=translate)
+
+
+@app.command(rich_help_panel="Daily")
 def search(
     query: list[str] = typer.Argument(..., help="What you are looking for."),
     limit: int = typer.Option(10, "--limit", "-n"),

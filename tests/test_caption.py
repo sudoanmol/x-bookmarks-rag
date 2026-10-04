@@ -93,11 +93,6 @@ def test_a_failed_caption_retries_only_when_asked(workspace):
         conn,
         caption_mod.Caption(media_key="m1", error="429"),
     )
-    assert [j.media_key for j in caption_mod.pending(conn)] == ["m1"]
-    caption_mod.save(
-        conn,
-        caption_mod.Caption(media_key="m1", error="429"),
-    )
     assert caption_mod.pending(conn) == []
     assert [j.media_key for j in caption_mod.pending(conn, retry_failed=True)] == ["m1"]
     conn.close()

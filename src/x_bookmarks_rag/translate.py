@@ -101,7 +101,9 @@ def groq_translator(client: httpx.Client, sleep=time.sleep) -> Translator:
     return translate
 
 
-def pending(conn: sqlite3.Connection) -> list[tuple[str, Chunk]]:
+def pending(
+    conn: sqlite3.Connection, *, exclude: frozenset[str] = frozenset()
+) -> list[tuple[str, Chunk]]:
     """(hash, chunk) for every candidate the cache has not seen, from the very
     chunks `xbm index` would build."""
     from .index import _collect, _hash  # index imports this module
@@ -111,7 +113,7 @@ def pending(conn: sqlite3.Connection) -> list[tuple[str, Chunk]]:
     for chunks in _collect(conn).values():
         for piece in chunks:
             key = _hash(piece.text)
-            if key not in known and is_candidate(piece):
+            if piece.source not in exclude and key not in known and is_candidate(piece):
                 out[key] = piece
     return list(out.items())
 

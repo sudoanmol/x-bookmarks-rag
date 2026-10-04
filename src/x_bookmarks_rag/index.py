@@ -115,9 +115,15 @@ def build(
     conn: sqlite3.Connection,
     *,
     rebuild: bool = False,
+    exclude: frozenset[str] = frozenset(),
+    translated: bool = True,
     on_progress: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, int]:
-    """Sync chunks to the current bookmarks, then embed whatever is missing."""
+    """Sync chunks to the current bookmarks, then embed whatever is missing.
+
+    `exclude` names chunk sources to leave out of the index (image, video, ...).
+    `translated=False` indexes foreign chunks in their original language.
+    """
     if rebuild:
         conn.executescript(
             "DELETE FROM chunk_vec; DELETE FROM chunks; "
@@ -125,8 +131,12 @@ def build(
         )
         conn.commit()
 
-    desired = _collect(conn)
-    english = translate.lookup(conn)
+    desired = {
+        tweet_id: kept
+        for tweet_id, pieces in _collect(conn).items()
+        if (kept := [p for p in pieces if p.source not in exclude])
+    }
+    english = translate.lookup(conn) if translated else {}
     existing: dict[str, set[str]] = {}
     for row in conn.execute("SELECT tweet_id, hash FROM chunks"):
         existing.setdefault(row["tweet_id"], set()).add(row["hash"])
@@ -162,11 +172,19 @@ def build(
         if on_progress and index % 50 == 0:
             on_progress("chunking", index, len(desired))
 
-    # Bookmarks that vanished take their chunks with them.
-    conn.execute(
-        "DELETE FROM chunks WHERE tweet_id IN "
-        "(SELECT tweet_id FROM bookmarks WHERE removed_at IS NOT NULL)"
-    )
+    # Bookmarks that vanished, or lost every chunk to `exclude`, take their
+    # chunks with them.
+    gone = [
+        (r["tweet_id"],)
+        for r in conn.execute("SELECT DISTINCT tweet_id FROM chunks")
+        if r["tweet_id"] not in desired
+    ]
+    for (tweet_id,) in gone:
+        conn.execute(
+            "DELETE FROM chunk_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE tweet_id = ?)",
+            (tweet_id,),
+        )
+        removed += conn.execute("DELETE FROM chunks WHERE tweet_id = ?", (tweet_id,)).rowcount
     conn.commit()
 
     pending = conn.execute(

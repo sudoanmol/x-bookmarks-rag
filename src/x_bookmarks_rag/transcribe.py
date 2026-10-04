@@ -16,7 +16,6 @@ import modal
 from .extract import Document, save
 
 MODEL = "large-v3-turbo"
-MAX_ATTEMPTS = 2
 # Start a new paragraph once the current one spans this many seconds.
 PARAGRAPH_S = 60.0
 
@@ -142,10 +141,13 @@ def to_html(segments: Iterable[tuple[float, float, str]]) -> str:
 
 
 def pending(conn: sqlite3.Connection, *, retry_failed: bool = False) -> list[Job]:
-    """Videos still worth transcribing, longest first so containers finish together."""
-    done: dict[str, int] = {}
-    for row in conn.execute("SELECT url, error, attempts FROM documents WHERE kind = 'video'"):
-        done[row["url"]] = -1 if not row["error"] else row["attempts"]
+    """Videos never transcribed, plus failed ones when asked. Longest first, so
+    containers finish together. A failure is not retried on its own: each run
+    starts GPUs, and the usual failure is a video deleted at X."""
+    failed = {
+        r["url"]: bool(r["error"])
+        for r in conn.execute("SELECT url, error FROM documents WHERE kind = 'video'")
+    }
 
     jobs: list[Job] = []
     for row in conn.execute(
@@ -160,8 +162,7 @@ def pending(conn: sqlite3.Connection, *, retry_failed: bool = False) -> list[Job
         """
     ):
         url = f"https://x.com/{row['handle']}/status/{row['tweet_id']}/video/{row['position'] + 1}"
-        attempts = done.get(url)
-        if attempts is None or (attempts >= 0 and (retry_failed or attempts < MAX_ATTEMPTS)):
+        if url not in failed or (retry_failed and failed[url]):
             jobs.append(Job(url, row["small_url"], row["tweet_id"], row["duration_ms"] or 0))
     return jobs
 

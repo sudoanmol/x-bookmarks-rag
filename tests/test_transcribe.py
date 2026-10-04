@@ -86,11 +86,9 @@ def test_a_silent_clip_is_done_and_not_retried(workspace):
     conn.close()
 
 
-def test_a_failure_retries_until_attempts_run_out(workspace):
+def test_a_failure_retries_only_when_asked(workspace):
     conn = db.connect()
     failing = stub({"error": "HTTPStatusError: 404"})
-    transcribe_mod.run(conn, transcribe_mod.pending(conn), transcriber=failing)
-    assert len(transcribe_mod.pending(conn)) == 1
     transcribe_mod.run(conn, transcribe_mod.pending(conn), transcriber=failing)
     assert transcribe_mod.pending(conn) == []
     assert len(transcribe_mod.pending(conn, retry_failed=True)) == 1

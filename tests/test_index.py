@@ -244,3 +244,20 @@ def test_a_matrix_leaves_the_prose_around_it_intact():
     text = chunk_mod.to_text(html)
     assert "We multiply" in text and "But then" in text
     assert "0.13" not in text
+
+
+def test_excluded_sources_leave_the_index_and_come_back(indexed):
+    conn = indexed
+    index_mod.build(conn)
+    sources = {r[0] for r in conn.execute("SELECT DISTINCT source FROM chunks")}
+    assert "quote" in sources
+
+    index_mod.build(conn, exclude=frozenset({"quote"}))
+    assert not conn.execute("SELECT COUNT(*) FROM chunks WHERE source = 'quote'").fetchone()[0]
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM chunk_vec WHERE chunk_id NOT IN (SELECT id FROM chunks)"
+    ).fetchone()[0]
+    assert orphans == 0
+
+    index_mod.build(conn)
+    assert conn.execute("SELECT COUNT(*) FROM chunks WHERE source = 'quote'").fetchone()[0]

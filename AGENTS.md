@@ -49,18 +49,19 @@ outside the repo on purpose.
 
 ```bash
 uv run xbm login      # opens a browser; the owner signs in by hand
-uv run xbm sync       # capture new bookmarks since the watermark
-uv run xbm status     # session and sync state
+uv run xbm sync       # every stage below, in order, on what is new
+uv run xbm status     # coverage per stage, and readiness of each service
+uv run xbm capture    # capture new bookmarks since the watermark
 uv run xbm inspect    # report what the captured data contains
 uv run xbm normalize  # rebuild the DB from raw pages on disk
 uv run xbm extract    # fetch full text behind articles and links
 uv run xbm caption    # vision model on a Modal GPU (--limit, --retry)
 uv run xbm transcribe # Whisper on Modal GPUs (--limit, --retry)
 uv run xbm translate  # Groq gpt-oss-120b over foreign chunks
-uv run xbm index      # chunk and embed  (--rebuild to redo everything)
+uv run xbm index      # chunk and embed  (--rebuild, --no-* exclusions)
 uv run xbm search "..."  # hybrid search  (-n, --author, --source)
 
-uv run pytest -q      # 124 tests, all offline, ~1s
+uv run pytest -q      # 131 tests, all offline, ~1s
 ```
 
 Ollama must be running, with `embeddinggemma` pulled. That is the only model
@@ -311,6 +312,25 @@ Each of these cost real time. Do not rediscover them.
 
 ---
 
+## 7b. The CLI
+
+- `xbm sync` runs capture, extract, caption, transcribe, translate, index. A
+  failed stage does not stop the rest; the run exits non-zero at the end.
+  Each stage is a `_stage()` function in `cli.py` that its own command and
+  `sync` both call.
+- **Exclusions persist** in `~/.config/x-bookmarks/config.toml`
+  (`exclude = [...]`, `translate = true`), read by `config.settings()`.
+  `--no-*` flags add to it for one run. An excluded source is skipped at its
+  stage and dropped from the index (vectors too), but stays in the database.
+- **GPU stages never retry failures on their own**; only `--retry` does. The
+  usual failure is media deleted at X, and each try starts a GPU.
+- **`sync` captions only at 20 new photos** (`caption.SYNC_MIN_PHOTOS`). vLLM
+  startup costs the same 5 to 8 H100 minutes for 1 photo as for 600.
+  `xbm caption` ignores the threshold. Transcripts need no threshold: L4
+  startup is about a minute.
+
+---
+
 ## 8. MCP server
 
 This is done. `mcp_server.py` uses MCP 2.0 and stdio transport. Codex has the
@@ -385,7 +405,7 @@ In the owner's chosen order. Each layer must leave a working product.
 
 ## 10. How to verify your work
 
-- `uv run pytest -q` — 124 tests, all offline, about one second. Keep it that way.
+- `uv run pytest -q` — 131 tests, all offline, about one second. Keep it that way.
   Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
   `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
 - Run a real query and read the passages:
