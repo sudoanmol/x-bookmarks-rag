@@ -61,7 +61,7 @@ uv run xbm translate  # Groq gpt-oss-120b over foreign chunks
 uv run xbm index      # chunk and embed  (--rebuild, --no-* exclusions)
 uv run xbm search "..."  # hybrid search  (-n, --author, --source)
 
-uv run pytest -q      # 131 tests, all offline, ~1s
+uv run pytest -q      # 134 tests, all offline, ~1s
 ```
 
 Ollama must be running, with `embeddinggemma` pulled. That is the only model
@@ -354,12 +354,22 @@ a way to know that deeper exists.
 
 ### The tools
 
-1. **`search_bookmarks(query, limit=10, author=None, source=None)`**
+1. **`search_bookmarks(query, limit=10, author=None, source=None, after=None, before=None)`**
    Wraps `search.search()`. Return per hit: `tweet_id`, `url`, `author`,
    `created_at`, `score`, `best_source`, `best_chunk` (the passage that
    matched), `best_ref` (the page URL it came from), `chunk_count`,
    `word_count`, `media`, `lang`.
-   `chunk_count` and `word_count` are what make tool 3 discoverable.
+   `chunk_count` and `word_count` are what make tool 3 discoverable. Also
+   `best_source_text` (the original of a translated passage) and, on the
+   response, `last_sync`. `after` is inclusive, `before` exclusive, on the post
+   date.
+
+   **Filters apply before ranking** (`search.allowed_chunks`). They used to
+   apply to the top 80 candidates, so `--source video -n 3` returned 2 hits.
+   sqlite-vec's `chunk_id IN (...)` is a true pre-filter, except with one id:
+   SQLite rewrites a one-item `IN` to `=`, and vec0 returns no rows for that
+   inside a KNN query. `_vector_ranks` short-circuits the single-candidate
+   case.
 
 2. **`get_bookmark(tweet_id)`**
    Full post text, quoted post, author, date, every link, every media item.
@@ -405,7 +415,7 @@ In the owner's chosen order. Each layer must leave a working product.
 
 ## 10. How to verify your work
 
-- `uv run pytest -q` — 131 tests, all offline, about one second. Keep it that way.
+- `uv run pytest -q` — 134 tests, all offline, about one second. Keep it that way.
   Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
   `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
 - Run a real query and read the passages:

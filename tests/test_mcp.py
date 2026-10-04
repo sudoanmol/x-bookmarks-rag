@@ -155,6 +155,28 @@ def test_a_short_transcript_is_indexed_searchable_and_readable(mcp_index):
     assert "[0:00] Quantized kernels ship today." in page.text
 
 
+def test_search_reports_last_sync_and_translated_originals(mcp_index):
+    from x_bookmarks_rag import db, translate as translate_mod
+
+    conn = index_mod.connect()
+    db.set_state(conn, "last_sync_at", "2026-10-03T00:00:00+00:00")
+    jobs = dict(translate_mod.pending(conn))
+    original = next(p.text for p in jobs.values() if p.tweet_id == "1002" and p.source == "post")
+    translate_mod.run(
+        conn, list(jobs.items()),
+        translator=lambda text: "@bob: Demo clip in English" if text == original else None,
+    )
+    index_mod.build(conn)
+    conn.commit()
+    conn.close()
+
+    result = mcp_server.search_bookmarks("demo clip english", source="post")
+    assert result.last_sync == "2026-10-03T00:00:00+00:00"
+    hit = next(h for h in result.hits if h.tweet_id == "1002")
+    assert hit.best_chunk == "@bob: Demo clip in English"
+    assert hit.best_source_text == original
+
+
 def test_mcp_call_returns_structured_content(mcp_index):
     async def call():
         return await mcp_server.server.call_tool("get_bookmark", {"tweet_id": "1001"})

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import date
 
 import sqlite_vec
 
@@ -34,6 +35,8 @@ class Hit:
     score: float
     best_source: str
     best_chunk: str
+    # The passage as written, when best_chunk is its English translation.
+    best_source_text: str | None
     # Where the matched passage came from: the page URL for a link or article,
     # None when the post itself matched. A caller citing a passage needs this.
     best_ref: str | None
@@ -52,6 +55,7 @@ class ChunkHit:
     ref: str | None
     position: int
     text: str
+    source_text: str | None
     score: float
 
 
@@ -73,6 +77,10 @@ def _vector_ranks(
 ) -> dict[int, int]:
     if chunk_ids is not None and not chunk_ids:
         return {}
+    # SQLite turns a one-item IN into `=`, and vec0 returns no rows for an
+    # equality inside a KNN query. A lone candidate ranks first anyway.
+    if chunk_ids is not None and len(chunk_ids) == 1:
+        return {next(iter(chunk_ids)): 0}
 
     vector = sqlite_vec.serialize_float32(embed.embed_query(query))
     params: list[object] = [vector, min(k, len(chunk_ids)) if chunk_ids is not None else k]
@@ -125,6 +133,46 @@ def _fuse(dense: dict[int, int], lexical: dict[int, int]) -> dict[int, float]:
     return fused
 
 
+def allowed_chunks(
+    conn: sqlite3.Connection,
+    *,
+    author: str | None = None,
+    source: str | None = None,
+    after: date | None = None,
+    before: date | None = None,
+) -> set[int] | None:
+    """The chunks a filtered search may rank, or None when nothing filters.
+
+    Filters apply before ranking, not after: a filter applied to the top
+    candidates sees only what happened to rank there, and returns too little.
+    """
+    clauses, params = [], []
+    if author:
+        clauses.append("LOWER(a.screen_name) = ?")
+        params.append(author.lstrip("@").lower())
+    if source:
+        clauses.append("c.source = ?")
+        params.append(source)
+    if after:
+        clauses.append("b.created_at >= ?")
+        params.append(after.isoformat())
+    if before:
+        clauses.append("b.created_at < ?")
+        params.append(before.isoformat())
+    if not clauses:
+        return None
+    rows = conn.execute(
+        f"""
+        SELECT c.id FROM chunks c
+        JOIN bookmarks b USING(tweet_id)
+        LEFT JOIN authors a ON a.author_id = b.author_id
+        WHERE b.removed_at IS NULL AND {" AND ".join(clauses)}
+        """,
+        params,
+    ).fetchall()
+    return {row["id"] for row in rows}
+
+
 def search(
     conn: sqlite3.Connection,
     query: str,
@@ -132,9 +180,13 @@ def search(
     limit: int = 10,
     author: str | None = None,
     source: str | None = None,
+    after: date | None = None,
+    before: date | None = None,
 ) -> list[Hit]:
-    dense = _vector_ranks(conn, query, CANDIDATES)
-    lexical = _lexical_ranks(conn, query, CANDIDATES)
+    """`after` is inclusive and `before` exclusive, both on the post date."""
+    allowed = allowed_chunks(conn, author=author, source=source, after=after, before=before)
+    dense = _vector_ranks(conn, query, CANDIDATES, allowed)
+    lexical = _lexical_ranks(conn, query, CANDIDATES, allowed)
 
     fused = _fuse(dense, lexical)
     if not fused:
@@ -143,7 +195,7 @@ def search(
     placeholders = ",".join("?" * len(fused))
     rows = conn.execute(
         f"""
-        SELECT c.id, c.tweet_id, c.source, c.text AS chunk_text, c.ref,
+        SELECT c.id, c.tweet_id, c.source, c.text AS chunk_text, c.source_text, c.ref,
                b.url, b.text, b.created_at, b.lang,
                a.screen_name,
                (SELECT COUNT(*) FROM chunks WHERE tweet_id = b.tweet_id) AS chunk_count,
@@ -162,10 +214,6 @@ def search(
     # out-rank a sharper short post just by having more pieces.
     best: dict[str, tuple[float, sqlite3.Row]] = {}
     for row in rows:
-        if author and (row["screen_name"] or "").lower() != author.lstrip("@").lower():
-            continue
-        if source and row["source"] != source:
-            continue
         score = fused[row["id"]]
         if row["tweet_id"] not in best or score > best[row["tweet_id"]][0]:
             best[row["tweet_id"]] = (score, row)
@@ -181,6 +229,7 @@ def search(
             score=score,
             best_source=row["source"],
             best_chunk=row["chunk_text"],
+            best_source_text=row["source_text"],
             best_ref=row["ref"],
             lang=row["lang"],
             media=row["media"],
@@ -208,7 +257,7 @@ def search_chunks(
     selected = sorted(fused, key=fused.get, reverse=True)[:limit]
     placeholders = ",".join("?" for _ in selected)
     rows = conn.execute(
-        f"SELECT id, source, ref, position, text FROM chunks WHERE id IN ({placeholders})",
+        f"SELECT id, source, ref, position, text, source_text FROM chunks WHERE id IN ({placeholders})",
         selected,
     ).fetchall()
     by_id = {row["id"]: row for row in rows}
@@ -219,6 +268,7 @@ def search_chunks(
             ref=by_id[chunk_id]["ref"],
             position=by_id[chunk_id]["position"],
             text=by_id[chunk_id]["text"],
+            source_text=by_id[chunk_id]["source_text"],
             score=fused[chunk_id],
         )
         for chunk_id in selected

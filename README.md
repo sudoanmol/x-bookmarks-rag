@@ -99,7 +99,11 @@ uv run xbm search "postgres connection pooling" -n 5
 uv run xbm search "design systems" --author shadcn
 uv run xbm search "the slide with the pricing table" --source image
 uv run xbm search "what did he say about HBM" --source video
+uv run xbm search "agent harnesses" --after 2026-09-01 --before 2026-10-01
 ```
+
+Filters apply before ranking, so a filtered search draws on every match, not
+just the ones that ranked high overall. Dates are post dates.
 
 Each stage is also its own command, for reruns and repairs:
 
@@ -158,7 +162,7 @@ Include it again and the next `xbm index` brings it back.
 
 | Tool | Returns |
 | --- | --- |
-| `search_bookmarks(query, limit, author, source)` | One passage per bookmark, with `chunk_count` and `word_count` so the caller knows when there is more to read. |
+| `search_bookmarks(query, limit, author, source, after, before)` | One passage per bookmark, with `chunk_count` and `word_count` so the caller knows when there is more to read, the original of a translated passage, and `last_sync` so the caller knows how fresh the index is. |
 | `get_bookmark(tweet_id)` | Full post, quoted post, author, links, and media with captions. Never document bodies. |
 | `read_document(tweet_id_or_url, query, offset)` | The page or transcript behind a bookmark. With `query`, the best passages inside it. Without, bounded pages with `has_more`. |
 

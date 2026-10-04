@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -438,6 +439,8 @@ def search(
     limit: int = typer.Option(10, "--limit", "-n"),
     author: str = typer.Option(None, "--author", "-a", help="Restrict to one handle."),
     source: str = typer.Option(None, "--source", help="post, quote, article, link, image, or video."),
+    after: datetime = typer.Option(None, "--after", formats=["%Y-%m-%d"], help="Posts on or after this date."),
+    before: datetime = typer.Option(None, "--before", formats=["%Y-%m-%d"], help="Posts before this date."),
 ) -> None:
     """Search your bookmarks in natural language."""
     text = " ".join(query)
@@ -445,7 +448,10 @@ def search(
     if not conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]:
         console.print("[yellow]Nothing indexed yet. Run `xbm index` first.[/yellow]")
         raise typer.Exit(1)
-    hits = search_mod.search(conn, text, limit=limit, author=author, source=source)
+    hits = search_mod.search(
+        conn, text, limit=limit, author=author, source=source,
+        after=after.date() if after else None, before=before.date() if before else None,
+    )
     conn.close()
 
     if not hits:

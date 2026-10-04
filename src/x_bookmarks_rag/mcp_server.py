@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Literal
 
 from mcp.server import MCPServer
@@ -17,6 +18,12 @@ PAGE_CHARS = 12_000
 PASSAGE_LIMIT = 5
 
 Source = Literal["post", "quote", "article", "link", "image", "video"]
+SOURCES = (
+    "post: the bookmarked post's own text. quote: the post it quotes. "
+    "article: an X Article (long-form post). link: a page the post links to, "
+    "extracted in full. image: a photo's OCR text and description. "
+    "video: a video's spoken words, with [m:ss] timestamps."
+)
 SearchLimit = Annotated[int, Field(ge=1, le=50, description="Maximum number of bookmarks to return.")]
 Offset = Annotated[int, Field(ge=0, description="Character offset for document paging.")]
 
@@ -29,6 +36,7 @@ class SearchHit(BaseModel):
     score: float
     best_source: str
     best_chunk: str
+    best_source_text: str | None
     best_ref: str | None
     chunk_count: int
     word_count: int
@@ -38,6 +46,8 @@ class SearchHit(BaseModel):
 
 class SearchResponse(BaseModel):
     query: str
+    # When the owner last synced. Bookmarks saved after this are not searchable yet.
+    last_sync: str | None
     hits: list[SearchHit]
 
 
@@ -105,6 +115,7 @@ class DocumentPassage(BaseModel):
     position: int
     score: float
     text: str
+    source_text: str | None = None
 
 
 class DocumentRead(BaseModel):
@@ -120,10 +131,24 @@ class DocumentRead(BaseModel):
 
 server = MCPServer(
     "x-bookmarks",
-    description="Search and read the owner's X bookmarks and extracted pages.",
+    description=(
+        "Search and read the owner's X bookmarks: posts, quoted posts, linked pages, "
+        "X Articles, photo text, and video transcripts."
+    ),
     instructions=(
-        "Use search_bookmarks first. Use get_bookmark for the full post and its attachments. "
-        "Use read_document when a hit has more than one chunk or comes from an extracted page."
+        "The corpus is the owner's X bookmarks. Beyond post text it holds the full text of "
+        "linked pages and X Articles, OCR text and descriptions of photos, and timestamped "
+        "transcripts of videos. Foreign text is indexed in English; best_source_text and "
+        "source_text hold the original.\n"
+        "1. search_bookmarks finds bookmarks. It returns one passage per bookmark: the one "
+        "that matched best. Filter by author, source, or post date (after, before).\n"
+        "2. get_bookmark returns the full post, quoted post, links, and media with captions.\n"
+        "3. read_document reads the page or transcript behind a bookmark. A hit whose "
+        "chunk_count is above 1 or whose word_count is large has more than the passage shown: "
+        "call read_document with a query to get the best passages inside it, or page through "
+        "it with offset. Never page through a long document when a query would do.\n"
+        "Search results carry last_sync. Bookmarks saved after it are not indexed yet; say so "
+        "when it matters."
     ),
 )
 
@@ -141,16 +166,26 @@ def search_bookmarks(
     query: Annotated[str, Field(min_length=1, description="Natural-language search query.")],
     limit: SearchLimit = 10,
     author: Annotated[str | None, Field(description="X handle, with or without @.")] = None,
-    source: Annotated[Source | None, Field(description="Content type to search.")] = None,
+    source: Annotated[Source | None, Field(description=f"Search one content type. {SOURCES}")] = None,
+    after: Annotated[date | None, Field(description="Posts made on or after this date.")] = None,
+    before: Annotated[date | None, Field(description="Posts made before this date.")] = None,
 ) -> SearchResponse:
-    """Search bookmarks. Each result includes its best matching passage and size."""
+    """Search bookmarks in natural language. Hybrid: meaning and exact words.
+
+    Returns one passage per bookmark, the best match, with chunk_count and
+    word_count telling how much more the bookmark holds.
+    """
     conn = _open_index()
     try:
-        hits = search_mod.search(conn, query, limit=limit, author=author, source=source)
+        hits = search_mod.search(
+            conn, query, limit=limit, author=author, source=source, after=after, before=before
+        )
+        last_sync = db.get_state(conn, "last_sync_at")
     finally:
         conn.close()
     return SearchResponse(
         query=query,
+        last_sync=last_sync,
         hits=[
             SearchHit(
                 tweet_id=hit.tweet_id,
@@ -160,6 +195,7 @@ def search_bookmarks(
                 score=hit.score,
                 best_source=hit.best_source,
                 best_chunk=hit.best_chunk,
+                best_source_text=hit.best_source_text,
                 best_ref=hit.best_ref,
                 chunk_count=hit.chunk_count,
                 word_count=hit.word_count,
@@ -175,7 +211,11 @@ def search_bookmarks(
 def get_bookmark(
     tweet_id: Annotated[str, Field(min_length=1, description="Numeric X post ID.")],
 ) -> Bookmark:
-    """Get the full post, quoted post, author, links, and media. Excludes page bodies."""
+    """Get one bookmark: full post, quoted post, author, links, and media.
+
+    Photos carry their caption (OCR text and description). Page and transcript
+    bodies are left out; read them with read_document.
+    """
     conn = db.connect()
     try:
         row = conn.execute(
@@ -286,15 +326,22 @@ def _document_info(rows) -> list[DocumentInfo]:
 def read_document(
     tweet_id_or_url: Annotated[
         str,
-        Field(min_length=1, description="A bookmark's numeric post ID or an extracted page URL."),
+        Field(
+            min_length=1,
+            description="A bookmark's numeric post ID (reads all its pages and transcripts) or one page or video URL.",
+        ),
     ],
     query: Annotated[
         str | None,
-        Field(description="Search only these pages and return their five best passages."),
+        Field(description="Return the five best passages inside these documents for this query."),
     ] = None,
     offset: Offset = 0,
 ) -> DocumentRead:
-    """Read extracted page text. Use query for passages, or offset for bounded paging."""
+    """Read the pages, X Articles, and video transcripts behind a bookmark.
+
+    With query: the best passages inside them. Without: 12,000-character pages;
+    pass next_offset back while has_more is true.
+    """
     conn = index_mod.connect()
     try:
         rows = _find_documents(conn, tweet_id_or_url)
@@ -329,6 +376,7 @@ def read_document(
                         position=hit.position,
                         score=hit.score,
                         text=hit.text,
+                        source_text=hit.source_text,
                     )
                     for hit in hits
                 ],

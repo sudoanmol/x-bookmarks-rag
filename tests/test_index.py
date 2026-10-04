@@ -261,3 +261,21 @@ def test_excluded_sources_leave_the_index_and_come_back(indexed):
 
     index_mod.build(conn)
     assert conn.execute("SELECT COUNT(*) FROM chunks WHERE source = 'quote'").fetchone()[0]
+
+
+def test_a_filter_applies_before_ranking_not_after(indexed, monkeypatch):
+    """With one candidate slot, a post-ranking filter would find nothing."""
+    index_mod.build(indexed)
+    monkeypatch.setattr(search_mod, "CANDIDATES", 1)
+    hits = search_mod.search(indexed, "chart worth keeping", author="bob")
+    assert [h.tweet_id for h in hits] == ["1002"]
+
+
+def test_date_filters_use_the_post_date(indexed):
+    from datetime import date
+
+    index_mod.build(indexed)
+    ids = lambda **kw: {h.tweet_id for h in search_mod.search(indexed, "chart demo piece body", **kw)}
+    assert ids(after=date(2025, 2, 3)) == {"1002", "1004"}
+    assert ids(before=date(2025, 1, 1)) == {"1001"}
+    assert ids(after=date(2025, 1, 1), before=date(2025, 3, 1)) == {"1003", "1004"}
