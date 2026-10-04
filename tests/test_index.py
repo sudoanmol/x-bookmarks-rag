@@ -119,6 +119,19 @@ def test_edited_text_replaces_its_old_chunks(indexed):
     assert texts == ["@alice: something completely different"]
 
 
+def test_image_captions_are_indexed_and_searchable(indexed):
+    indexed.execute(
+        "INSERT INTO captions(media_key, text, attempts) VALUES('m1', 'haiku model settings.json', 1)"
+    )
+    indexed.commit()
+    index_mod.build(indexed)
+    hits = search_mod.search(indexed, "haiku model settings.json", limit=5, source="image")
+    assert hits
+    assert hits[0].tweet_id == "1001"
+    assert hits[0].best_source == "image"
+    assert "@alice:" in hits[0].best_chunk
+
+
 # --------------------------------------------------------------------------
 # search
 # --------------------------------------------------------------------------

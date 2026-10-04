@@ -117,18 +117,16 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_tweet ON documents(tweet_id);
 CREATE INDEX IF NOT EXISTS idx_documents_depth ON documents(depth);
 
-CREATE TABLE IF NOT EXISTS enrichment (
-    kind       TEXT NOT NULL,
-    ref        TEXT NOT NULL,
-    state      TEXT NOT NULL DEFAULT 'pending',
-    attempts   INTEGER NOT NULL DEFAULT 0,
-    provider   TEXT,
-    error      TEXT,
-    updated_at TEXT,
-    PRIMARY KEY (kind, ref)
-);
+DROP TABLE IF EXISTS enrichment;
 
-CREATE INDEX IF NOT EXISTS idx_enrichment_state ON enrichment(kind, state);
+CREATE TABLE IF NOT EXISTS captions (
+    media_key  TEXT PRIMARY KEY,
+    text       TEXT NOT NULL DEFAULT '',
+    model      TEXT,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    error      TEXT,
+    updated_at TEXT
+);
 """
 
 

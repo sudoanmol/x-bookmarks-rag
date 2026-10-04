@@ -135,6 +135,18 @@ def status() -> None:
     console.print(f"Watermark    : {db.get_watermark(conn) or 'not set'}")
     console.print(f"Last sync    : {db.get_state(conn, 'last_sync_at') or 'never'}")
     console.print(f"Groq key     : {'[green]set[/green]' if config.GROQ_API_KEY else '[red]missing[/red]'}")
+    photos = conn.execute(
+        "SELECT COUNT(*) FROM media m JOIN bookmarks b USING(tweet_id) "
+        "WHERE b.removed_at IS NULL AND m.kind = 'photo'"
+    ).fetchone()[0]
+    captioned = conn.execute(
+        "SELECT COUNT(*) FROM captions WHERE error IS NULL AND text != ''"
+    ).fetchone()[0]
+    failed = conn.execute(
+        "SELECT COUNT(*) FROM captions WHERE error IS NOT NULL"
+    ).fetchone()[0]
+    extra = f"  [red]{failed} failed[/red]" if failed else ""
+    console.print(f"Captions     : {captioned}/{photos}{extra}")
     conn.close()
 
 
@@ -166,6 +178,35 @@ def extract(
 
 
 @app.command()
+def caption(
+    limit: int = typer.Option(None, "--limit", "-n", help="Stop after this many images."),
+    retry: bool = typer.Option(False, "--retry", help="Try the failed images again."),
+) -> None:
+    """Caption bookmark photos with a vision model on a Modal GPU."""
+    from . import caption as caption_mod
+
+    conn = db.connect()
+    jobs = caption_mod.pending(conn, retry_failed=retry)
+    if limit:
+        jobs = jobs[:limit]
+    if not jobs:
+        console.print("[green]Every photo is captioned.[/green]")
+        return
+
+    console.print(f"[dim]{len(jobs)} photos[/dim]")
+    # Plain lines, not a status spinner: Modal draws its own live output.
+    def on_progress(done: int, total: int, cap) -> None:
+        if cap.error:
+            console.print(f"[red]x[/red] {cap.media_key}: {cap.error}")
+        if done % caption_mod.BATCH == 0 or done == total:
+            console.print(f"{done}/{total}")
+
+    tally = caption_mod.run(conn, jobs, on_progress=on_progress)
+    conn.close()
+    console.print(f"[green]{tally['ok']:,} captioned[/green] [dim]{tally['failed']:,} failed[/dim]")
+
+
+@app.command()
 def index(
     rebuild: bool = typer.Option(False, "--rebuild", help="Discard chunks and embed everything again."),
 ) -> None:
@@ -188,7 +229,7 @@ def search(
     query: list[str] = typer.Argument(..., help="What you are looking for."),
     limit: int = typer.Option(10, "--limit", "-n"),
     author: str = typer.Option(None, "--author", "-a", help="Restrict to one handle."),
-    source: str = typer.Option(None, "--source", help="post, quote, article, or link."),
+    source: str = typer.Option(None, "--source", help="post, quote, article, link, or image."),
 ) -> None:
     """Search your bookmarks in natural language."""
     text = " ".join(query)

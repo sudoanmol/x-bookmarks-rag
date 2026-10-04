@@ -4,8 +4,8 @@ Natural-language search over the owner's X (Twitter) bookmarks. It captures
 bookmarks with a real browser, extracts the full text behind articles and
 links, embeds everything locally, and searches with hybrid retrieval.
 
-No X API. No paid services. Everything runs on this machine, except Groq,
-which is used only on its free tier.
+No X API. Everything runs on this machine, except two remote services:
+Groq on its free tier, and Modal (owner's free credits) for GPU captioning.
 
 **This file is the handoff.** Read all of it before you change anything. Many
 rules below cost hours to learn. The reasons are given so you can tell when a
@@ -53,10 +53,11 @@ uv run xbm status     # session and sync state
 uv run xbm inspect    # report what the captured data contains
 uv run xbm normalize  # rebuild the DB from raw pages on disk
 uv run xbm extract    # fetch full text behind articles and links
+uv run xbm caption    # vision model on a Modal GPU (--limit, --retry)
 uv run xbm index      # chunk and embed  (--rebuild to redo everything)
 uv run xbm search "..."  # hybrid search  (-n, --author, --source)
 
-uv run pytest -q      # 85 tests, all offline, ~1s
+uv run pytest -q      # 103 tests, all offline, ~1s
 ```
 
 Ollama must be running, with `embeddinggemma` pulled. That is the only model
@@ -76,6 +77,7 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
                            bookmarks / authors / media / links
                               |
                     extract (Playwright + Defuddle)  ->  documents
+                    caption (Modal + vLLM)           ->  captions
                               |
                            chunk  ->  embed  ->  chunks + chunk_vec + chunk_fts
                               |
@@ -91,7 +93,8 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
 | `normalize.py` | Rebuilds the DB from raw pages. |
 | `db.py` | Schema and idempotent upserts. Owns **all** tables. |
 | `extract.py` | Renders pages and pulls readable text with Defuddle. |
-| `chunk.py` | Turns rows and documents into embeddable pieces. |
+| `caption.py` | Modal app (vLLM on one H100) plus the local job and save logic. |
+| `chunk.py` | Turns rows, documents, and captions into embeddable pieces. |
 | `embed.py` | Ollama calls. Asymmetric prefixes (see §8). |
 | `index.py` | Builds `chunks`, `chunk_vec`, `chunk_fts`. Owns the vec0 connection. |
 | `search.py` | Hybrid retrieval with reciprocal rank fusion. |
@@ -118,8 +121,8 @@ All tables live in `db.py`. `data/bookmarks.db`, WAL mode, `busy_timeout=30000`.
 | `media` | `media_key` PK, `kind` (photo/video/animated_gif), `url`, `alt_text`, `duration_ms`, `bitrate`, **`small_url`/`small_bitrate`**. |
 | `links` | `(tweet_id, url)` PK, `domain`, `title`, `description`, `from_card`. |
 | `documents` | `url` PK, `kind` (x_article/link), `tweet_id`, `title`, `body` (**HTML**), `word_count`, `attempts`, `error`. |
-| `enrichment` | `(kind, ref)` PK, `state`, `attempts`, `provider`, `error`. Built for captions and transcripts. **Not used yet.** |
-| `chunks` | `id`, `tweet_id`, `source` (post/quote/article/link), `ref`, `position`, `text`, `source_text`, `lang`, `hash`. |
+| `captions` | `media_key` PK, `text`, `model`, `attempts`, `error`. No FK to `media`: `replace_media` deletes and reinserts on every normalize. |
+| `chunks` | `id`, `tweet_id`, `source` (post/quote/article/link/image), `ref`, `position`, `text`, `source_text`, `lang`, `hash`. |
 | `chunk_vec` | vec0 virtual table, `FLOAT[768]`. |
 | `chunk_fts` | fts5 external-content table over `chunks`. |
 | `sync_state` | `watermark` = highest `sort_index` seen. |
@@ -127,7 +130,7 @@ All tables live in `db.py`. `data/bookmarks.db`, WAL mode, `busy_timeout=30000`.
 
 Two design points worth keeping:
 
-- **Soft delete.** Un-bookmarking sets `removed_at`, so enrichment survives.
+- **Soft delete.** Un-bookmarking sets `removed_at`, so captions survive.
 - **`sort_index`, not post time.** It orders by *bookmark* time, which is what
   incremental sync needs.
 
@@ -137,21 +140,27 @@ Two design points worth keeping:
 
 | Thing | Count |
 | --- | --- |
-| Bookmarks | 1,211 |
-| Authors | 779 |
-| Media | 843 — 541 photo, 294 video, 8 gif |
-| Media with alt text | **10** |
-| Links (unique) | 544 |
-| Documents | 693 stored, **670 usable** |
-| Extracted words | **1,087,352** |
-| Chunks / vectors | 3,373 / 3,373 |
-| Video | 42.0 hours: 249 clips under 10 min, 45 over |
+Counted on 2026-10-03.
 
-Layers 1 and 2 are done and working. Search returns real passages from
-extracted pages, not just post text.
+| Thing | Count |
+| --- | --- |
+| Bookmarks | 1,350 |
+| Authors | 856 |
+| Media | 949 — 606 photo, 335 video, 8 gif |
+| Media with alt text | **18** |
+| Links (unique) | 626 |
+| Documents | 789 stored, **683 usable**. Every link has a row. |
+| Extracted words | **1,217,416** |
+| Chunks / vectors | 4,297 / 4,297 (608 of them image chunks) |
+| Captions | **605 of 606** photos. The one failure is a 404 at X. |
+| Video | 51.2 hours: 279 clips under 10 min, 56 over |
 
-The 23 unusable documents are honest failures: 10 binary targets (PDFs),
-9 bot walls or paywalls, 4 dead domains.
+Layers 1 and 2 and image captions are done and working. Search returns real
+passages from extracted pages and OCR text from images, not just post text.
+
+The unusable documents are mostly "thin extraction" (under the word floor),
+plus 10 binary targets (PDFs). Links are stored under `normalize_url()`, so
+compare against `documents.url` through that function, not raw `links.url`.
 
 ---
 
@@ -187,8 +196,15 @@ caller reasons.
 **One vector space** for all content types, rather than separate indexes.
 
 **Groq for enrichment, not embeddings.** Groq serves no embedding models.
-Available and relevant: `qwen/qwen3.6-27b` (vision), `whisper-large-v3-turbo`
-(28,800 audio seconds per day), `openai/gpt-oss-120b` and `-20b`.
+Available and relevant: `whisper-large-v3-turbo` (28,800 audio seconds per
+day), `openai/gpt-oss-120b` and `-20b`.
+
+**Captions run on Modal, not Groq.** The Groq free tier (8,000 tokens per
+minute, serial) needed days for 600 photos. Modal runs the same model,
+`Qwen/Qwen3.8-27B-FP8`, under vLLM on one H100: 583 photos in one run, about
+15 minutes of GPU and roughly $1. The app is ephemeral (`app.run()`), so it
+stops when `xbm caption` exits. **The owner pays for every GPU second: after
+any Modal run, confirm `modal container list --json` prints `[]`.**
 
 ---
 
@@ -241,6 +257,22 @@ Each of these cost real time. Do not rediscover them.
 16. **Store the smallest MP4, not the best.** Transcription wants speech, not
     pixels. A 44.5-minute clip is 3.3 GB at top bitrate and 81 MB at 256 kbps.
     Across 40 bookmarks this was 10.73 GB versus 0.27 GB, a 40x saving.
+17. **Do not FK `captions` to `media`.** `replace_media` deletes and reinserts
+    on every normalize. `ON DELETE CASCADE` would wipe every caption on
+    `xbm sync`. `documents` has no FK for the same reason.
+18. **vLLM FP8 needs a CUDA devel image.** DeepGEMM compiles kernels at
+    startup and asserts on a missing CUDA toolkit. `debian_slim` has none.
+    Use `nvidia/cuda:<ver>-devel`, matched to the vLLM wheel (0.30 → CUDA 13).
+19. **Qwen3.8 is a hybrid Mamba model.** vLLM's default `max_num_seqs=1024`
+    exceeds its Mamba cache blocks on an H100 (796). Set it to the batch size.
+20. **A raise in Modal `@enter` crash-loops on the GPU** while the client
+    waits. `caption.Model.load` keeps the error and fails the first call
+    instead, so the run ends and the app stops.
+21. **Finish the Modal `.map()` generator.** Leaving it unfinished closes it
+    inside `app.run()` and raises `aclose(): asynchronous generator is already
+    running`. In `zip`, put the generator first.
+22. **Incremental sync stops one page after the watermark hit.** An earlier
+    version only stopped when a scroll returned no pages, so it walked all 69.
 
 ---
 
@@ -276,7 +308,8 @@ a way to know that deeper exists.
 
 2. **`get_bookmark(tweet_id)`**
    Full post text, quoted post, author, date, every link, every media item.
-   Cheap and bounded. Do **not** include document bodies here.
+   Each media item includes `caption` when one exists. Cheap and bounded.
+   Do **not** include document bodies here.
 
 3. **`read_document(tweet_id_or_url, query=None, offset=0)`**
    The extracted page text. **This one is dangerous if done naively**:
@@ -305,13 +338,11 @@ structured results against the live corpus.
 
 In the owner's chosen order. Each layer must leave a working product.
 
-1. **Image captions and OCR.** 541 photos, only 10 with alt text, so this is
-   mandatory for image search. Groq `qwen/qwen3.6-27b`, 5 images per request.
-   `pbs.twimg.com` URLs are public, so pass URLs directly — no downloading.
-   Track state in the `enrichment` table.
-2. **Video transcripts.** 42 hours total. Split by length: 249 clips under 10
+1. **Image captions and OCR.** Done. `uv run xbm caption` after each sync
+   captions only new photos, then `uv run xbm index`.
+2. **Video transcripts.** 51.2 hours total. Split by length: 279 clips under 10
    minutes go to Groq `whisper-large-v3-turbo` (free tier gives 28,800 audio
-   seconds per day, so the short set is about half of one day). The 45 long
+   seconds per day, so the short set is about half of one day). The 56 long
    clips run locally with `mlx-whisper`. Use `media.small_url`, never `url`.
 3. **Foreign language translation.** The owner asked for this explicitly.
    Design: `chunks.text` holds English, `chunks.source_text` holds the
@@ -324,7 +355,7 @@ In the owner's chosen order. Each layer must leave a working product.
 
 ## 10. How to verify your work
 
-- `uv run pytest -q` — 85 tests, all offline, about one second. Keep it that way.
+- `uv run pytest -q` — 103 tests, all offline, about one second. Keep it that way.
   Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
   `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
 - Run a real query and read the passages:

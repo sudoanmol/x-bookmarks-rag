@@ -17,8 +17,6 @@ from . import config, db
 
 # Groq free tier, whisper-large-v3-turbo: audio seconds per day.
 GROQ_AUDIO_SECONDS_PER_DAY = 28_800
-# Groq vision accepts at most 5 images per request.
-GROQ_IMAGES_PER_REQUEST = 5
 
 ALIVE = "removed_at IS NULL"
 
@@ -89,6 +87,15 @@ def gather(conn: sqlite3.Connection) -> dict:
         f"""SELECT COUNT(*) FROM media m JOIN bookmarks b USING(tweet_id)
             WHERE b.{ALIVE} AND m.alt_text IS NOT NULL AND m.alt_text != ''""",
     )
+    stats["photos"] = next(
+        (r["n"] for r in stats["media_by_kind"] if r["kind"] == "photo"), 0
+    )
+    stats["caption_ok"] = _scalar(
+        conn, "SELECT COUNT(*) FROM captions WHERE error IS NULL AND text != ''"
+    )
+    stats["caption_failed"] = _scalar(
+        conn, "SELECT COUNT(*) FROM captions WHERE error IS NOT NULL"
+    )
 
     videos = _rows(
         conn,
@@ -153,7 +160,7 @@ def _fmt_bytes(n: float) -> str:
 
 def render(stats: dict, console: Console | None = None) -> None:
     console = console or Console()
-    photos = next((r["n"] for r in stats["media_by_kind"] if r["kind"] == "photo"), 0)
+    photos = stats["photos"]
 
     overview = Table.grid(padding=(0, 2))
     overview.add_column(style="bold")
@@ -245,7 +252,8 @@ def render(stats: dict, console: Console | None = None) -> None:
     work.add_column()
     work.add_row(
         "Image captions",
-        f"{photos:,} images ≈ {-(-photos // GROQ_IMAGES_PER_REQUEST):,} Groq vision requests",
+        f"{stats['caption_ok']:,} of {photos:,} photos"
+        + (f"  ({stats['caption_failed']} failed)" if stats["caption_failed"] else ""),
     )
     work.add_row("Transcription", f"{_fmt_duration(stats['video_seconds'])} of audio")
     work.add_row("Article fetches", f"{stats['link_total']:,} external URLs")

@@ -64,6 +64,15 @@ FROM links l JOIN bookmarks b USING(tweet_id)
 WHERE b.removed_at IS NULL AND (l.title IS NOT NULL OR l.description IS NOT NULL)
 """
 
+IMAGE_SQL = """
+SELECT c.media_key, c.text, m.tweet_id, b.lang, a.screen_name
+FROM captions c
+JOIN media m USING(media_key)
+JOIN bookmarks b ON b.tweet_id = m.tweet_id
+LEFT JOIN authors a USING(author_id)
+WHERE b.removed_at IS NULL AND c.error IS NULL AND c.text != ''
+"""
+
 
 def connect() -> sqlite3.Connection:
     """A database connection with the vector extension loaded."""
@@ -96,6 +105,8 @@ def _collect(conn: sqlite3.Connection) -> dict[str, list[chunk_mod.Chunk]]:
     ):
         by_tweet.setdefault(piece.tweet_id, []).append(piece)
     for piece in chunk_mod.chunks_for_documents(documents):
+        by_tweet.setdefault(piece.tweet_id, []).append(piece)
+    for piece in chunk_mod.chunks_for_images(conn.execute(IMAGE_SQL).fetchall()):
         by_tweet.setdefault(piece.tweet_id, []).append(piece)
     return by_tweet
 

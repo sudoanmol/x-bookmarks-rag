@@ -87,7 +87,21 @@ def test_get_bookmark_returns_attachments_but_not_document_body(mcp_index):
     assert result.author.screen_name == "@alice"
     assert result.links[0].url == "https://example.com/post"
     assert result.media[0].alt_text == "a line chart"
+    assert result.media[0].caption is None
     assert "Needle cache method" not in result.model_dump_json()
+
+
+def test_get_bookmark_includes_the_caption(mcp_index):
+    from x_bookmarks_rag import db
+
+    conn = db.connect()
+    conn.execute(
+        "INSERT INTO captions(media_key, text, attempts) VALUES('m1', 'Image: a line chart', 1)"
+    )
+    conn.commit()
+    conn.close()
+    result = mcp_server.get_bookmark("1001")
+    assert result.media[0].caption == "Image: a line chart"
 
 
 def test_read_document_pages_plain_text(mcp_index):

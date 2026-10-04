@@ -185,3 +185,25 @@ def chunks_for_documents(rows: list[sqlite3.Row]) -> list[Chunk]:
                 )
             )
     return out
+
+
+def chunks_for_images(rows: list[sqlite3.Row]) -> list[Chunk]:
+    """Index a photo caption. The handle rides along as it does on posts."""
+    out: list[Chunk] = []
+    for row in rows:
+        caption = (row["text"] or "").strip()
+        if not caption:
+            continue
+        handle = f"@{row['screen_name']}" if row["screen_name"] else "@unknown"
+        for position, piece in enumerate(split_long(caption)):
+            out.append(
+                Chunk(
+                    tweet_id=row["tweet_id"],
+                    source="image",
+                    ref=row["media_key"],
+                    position=position,
+                    text=f"{handle}: {piece}",
+                    lang=row["lang"],
+                )
+            )
+    return out

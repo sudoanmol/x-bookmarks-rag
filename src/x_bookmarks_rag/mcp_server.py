@@ -16,7 +16,7 @@ from .extract import THIN_WORDS, normalize_url
 PAGE_CHARS = 12_000
 PASSAGE_LIMIT = 5
 
-Source = Literal["post", "quote", "article", "link"]
+Source = Literal["post", "quote", "article", "link", "image"]
 SearchLimit = Annotated[int, Field(ge=1, le=50, description="Maximum number of bookmarks to return.")]
 Offset = Annotated[int, Field(ge=0, description="Character offset for document paging.")]
 
@@ -77,6 +77,7 @@ class Media(BaseModel):
     small_url: str | None
     small_bitrate: int | None
     position: int
+    caption: str | None = None
 
 
 class Bookmark(BaseModel):
@@ -201,9 +202,13 @@ def get_bookmark(
         ).fetchall()
         media = conn.execute(
             """
-            SELECT media_key, kind, url, thumb_url, alt_text, width, height,
-                   duration_ms, bitrate, small_url, small_bitrate, position
-            FROM media WHERE tweet_id = ? ORDER BY position, media_key
+            SELECT m.media_key, m.kind, m.url, m.thumb_url, m.alt_text, m.width, m.height,
+                   m.duration_ms, m.bitrate, m.small_url, m.small_bitrate, m.position,
+                   CASE WHEN c.error IS NULL THEN c.text END AS caption
+              FROM media m
+              LEFT JOIN captions c ON c.media_key = m.media_key
+             WHERE m.tweet_id = ?
+             ORDER BY m.position, m.media_key
             """,
             (tweet_id,),
         ).fetchall()

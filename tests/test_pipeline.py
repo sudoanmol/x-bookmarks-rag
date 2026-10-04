@@ -110,6 +110,8 @@ def test_report_counts_the_things_phase_two_needs(workspace):
     assert stats["link_total"] == 2
     assert stats["with_alt"] == 1
     assert stats["articles"] == 1
+    assert stats["photos"] == 1
+    assert stats["caption_ok"] == 0
     # the report estimates the download we would actually make: smallest variant
     assert round(stats["video_bytes"]) == round(832_000 * 92 / 8)
     assert round(stats["video_bytes_best"]) == round(2_176_000 * 92 / 8)
