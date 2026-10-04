@@ -1,7 +1,7 @@
 [project]
 name = "x-bookmarks-rag"
 version = "0.1.0"
-description = "Add your description here"
+description = "Natural-language search over your X bookmarks, their linked pages, photos, and videos."
 readme = "README.md"
 authors = [
     { name = "Anmol Hurkat", email = "238388601+sudoanmol@users.noreply.github.com" }
