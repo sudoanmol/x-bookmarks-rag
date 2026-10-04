@@ -14,7 +14,7 @@ import sqlite_vec
 
 from . import chunk as chunk_mod
 from .extract import READABLE_SQL
-from . import db, embed
+from . import db, embed, translate
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS chunks (
@@ -126,13 +126,19 @@ def build(
         conn.commit()
 
     desired = _collect(conn)
+    english = translate.lookup(conn)
     existing: dict[str, set[str]] = {}
     for row in conn.execute("SELECT tweet_id, hash FROM chunks"):
         existing.setdefault(row["tweet_id"], set()).add(row["hash"])
 
     added = removed = 0
     for index, (tweet_id, pieces) in enumerate(desired.items(), 1):
-        want = {_hash(p.text): p for p in pieces}
+        want = {}
+        for p in pieces:
+            # A translated chunk embeds and matches as English, and keeps its original.
+            text = english.get(_hash(p.text))
+            source_text = p.text if text else None
+            want[_hash(text or p.text)] = (p, text or p.text, source_text)
         have = existing.get(tweet_id, set())
         if want.keys() == have:
             continue
@@ -145,9 +151,12 @@ def build(
             removed += len(stale)
 
         conn.executemany(
-            "INSERT INTO chunks(tweet_id, source, ref, position, text, lang, hash) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?)",
-            [(p.tweet_id, p.source, p.ref, p.position, p.text, p.lang, h) for h, p in want.items()],
+            "INSERT INTO chunks(tweet_id, source, ref, position, text, source_text, lang, hash) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (p.tweet_id, p.source, p.ref, p.position, text, source_text, p.lang, h)
+                for h, (p, text, source_text) in want.items()
+            ],
         )
         added += len(want)
         if on_progress and index % 50 == 0:

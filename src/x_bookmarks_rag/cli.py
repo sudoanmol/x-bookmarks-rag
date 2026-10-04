@@ -240,6 +240,35 @@ def transcribe(
 
 
 @app.command()
+def translate() -> None:
+    """Translate foreign chunks into English with Groq. Run `xbm index` after."""
+    from . import translate as translate_mod
+
+    if not config.GROQ_API_KEY:
+        console.print("[red]GROQ_API_KEY is missing from .env[/red]")
+        raise typer.Exit(1)
+
+    conn = db.connect()
+    jobs = translate_mod.pending(conn)
+    if not jobs:
+        console.print("[green]Nothing new to translate.[/green]")
+        return
+
+    console.print(f"[dim]{len(jobs)} candidate chunks[/dim]")
+
+    def on_progress(done: int, total: int, piece, error) -> None:
+        mark = f"[red]x {error}[/red]" if error else "ok"
+        console.print(f"{done}/{total} {mark} {piece.source} {piece.tweet_id} {piece.lang}")
+
+    tally = translate_mod.run(conn, jobs, on_progress=on_progress)
+    conn.close()
+    console.print(
+        f"[green]{tally['translated']:,} translated[/green] [dim]{tally['english']:,} already "
+        f"English, {tally['failed']:,} failed[/dim]"
+    )
+
+
+@app.command()
 def index(
     rebuild: bool = typer.Option(False, "--rebuild", help="Discard chunks and embed everything again."),
 ) -> None:

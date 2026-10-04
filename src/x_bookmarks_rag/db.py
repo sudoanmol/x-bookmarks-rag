@@ -127,6 +127,16 @@ CREATE TABLE IF NOT EXISTS captions (
     error      TEXT,
     updated_at TEXT
 );
+
+-- Keyed by the hash of the original chunk text. text NULL means the model
+-- called it English already, so it is not asked again.
+CREATE TABLE IF NOT EXISTS translations (
+    hash        TEXT PRIMARY KEY,
+    source_text TEXT NOT NULL,
+    text        TEXT,
+    model       TEXT,
+    updated_at  TEXT
+);
 """
 
 

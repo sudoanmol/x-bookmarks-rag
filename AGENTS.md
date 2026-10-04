@@ -56,10 +56,11 @@ uv run xbm normalize  # rebuild the DB from raw pages on disk
 uv run xbm extract    # fetch full text behind articles and links
 uv run xbm caption    # vision model on a Modal GPU (--limit, --retry)
 uv run xbm transcribe # Whisper on Modal GPUs (--limit, --retry)
+uv run xbm translate  # Groq gpt-oss-120b over foreign chunks
 uv run xbm index      # chunk and embed  (--rebuild to redo everything)
 uv run xbm search "..."  # hybrid search  (-n, --author, --source)
 
-uv run pytest -q      # 112 tests, all offline, ~1s
+uv run pytest -q      # 124 tests, all offline, ~1s
 ```
 
 Ollama must be running, with `embeddinggemma` pulled. That is the only model
@@ -98,6 +99,7 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
 | `extract.py` | Renders pages and pulls readable text with Defuddle. |
 | `caption.py` | Modal app (vLLM on one H100) plus the local job and save logic. |
 | `transcribe.py` | Modal app (faster-whisper on up to 8 L4s). Writes `documents` rows. |
+| `translate.py` | Picks foreign chunks, translates them with Groq, caches by text hash. |
 | `chunk.py` | Turns rows, documents, and captions into embeddable pieces. |
 | `embed.py` | Ollama calls. Asymmetric prefixes (see §8). |
 | `index.py` | Builds `chunks`, `chunk_vec`, `chunk_fts`. Owns the vec0 connection. |
@@ -126,6 +128,7 @@ All tables live in `db.py`. `data/bookmarks.db`, WAL mode, `busy_timeout=30000`.
 | `links` | `(tweet_id, url)` PK, `domain`, `title`, `description`, `from_card`. |
 | `documents` | `url` PK, `kind` (x_article/link/video), `tweet_id`, `title`, `body` (**HTML**), `word_count`, `attempts`, `error`. |
 | `captions` | `media_key` PK, `text`, `model`, `attempts`, `error`. No FK to `media`: `replace_media` deletes and reinserts on every normalize. |
+| `translations` | `hash` PK (of the original chunk text), `source_text`, `text` (NULL = already English), `model`. |
 | `chunks` | `id`, `tweet_id`, `source` (post/quote/article/link/image/video), `ref`, `position`, `text`, `source_text`, `lang`, `hash`. |
 | `chunk_vec` | vec0 virtual table, `FLOAT[768]`. |
 | `chunk_fts` | fts5 external-content table over `chunks`. |
@@ -155,7 +158,7 @@ Counted on 2026-10-03.
 | Links (unique) | 626 |
 | Documents | 1,119 stored, **819 usable**: 683 pages, 136 transcripts. Every link has a row. |
 | Extracted words | **1,217,416** |
-| Chunks / vectors | 5,005 / 5,005 (608 image, 708 video) |
+| Chunks / vectors | 5,005 / 5,005 (608 image, 708 video, 13 translated) |
 | Captions | **605 of 606** photos. The one failure is a 404 at X. |
 | Video | 335 clips, 51.2 hours. 136 have speech (533k words), 61 have audio but no speech, 133 have no audio track. |
 
@@ -201,8 +204,19 @@ caller reasons.
 **One vector space** for all content types, rather than separate indexes.
 
 **Groq for enrichment, not embeddings.** Groq serves no embedding models.
-Available and relevant: `openai/gpt-oss-120b` and `-20b`. Nothing calls Groq
-today.
+`translate.py` uses `openai/gpt-oss-120b` with `reasoning_effort: low`. The
+free tier allows 8,000 tokens per minute, prompt and reply together, so text
+goes in paragraph-aligned pieces of 1,500 characters and a 429 waits on
+`retry-after`.
+
+**Translation is per chunk, cached by text hash.** `xbm translate` builds the
+same chunks `xbm index` would, and asks about a chunk when its X tag is not
+English or its letters are mostly non-Latin. X's tag is wrong on most short
+posts ("ro", "de", "pt" on English text), so the model replies `ENGLISH` for
+those and the cache stores NULL. `index.build` puts the English in
+`chunks.text` and the original in `chunks.source_text`. Of 35 candidates, 13
+were really foreign: 4 Chinese and 3 Japanese posts or quotes, their
+screenshots, a Chinese gist and repo page, a Japanese video, a Spanish post.
 
 **Captions run on Modal, not Groq.** The Groq free tier (8,000 tokens per
 minute, serial) needed days for 600 photos. Modal runs the same model,
@@ -363,18 +377,15 @@ In the owner's chosen order. Each layer must leave a working product.
    captions only new photos, then `uv run xbm index`.
 2. **Video transcripts.** Done. `uv run xbm transcribe` after each sync, then
    `uv run xbm index`. Uses `media.small_url`, never `url`.
-3. **Foreign language translation.** The owner asked for this explicitly.
-   Design: `chunks.text` holds English, `chunks.source_text` holds the
-   original. Both columns already exist. Note that the `zxx` language bucket is
-   mostly X Articles, not foreign text — genuine translation work is about 11
-   posts.
+3. **Foreign language translation.** Done. `uv run xbm translate` after each
+   sync, then `uv run xbm index`.
 4. **Web UI.** Over the same `search.search()` function.
 
 ---
 
 ## 10. How to verify your work
 
-- `uv run pytest -q` — 112 tests, all offline, about one second. Keep it that way.
+- `uv run pytest -q` — 124 tests, all offline, about one second. Keep it that way.
   Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
   `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
 - Run a real query and read the passages:
