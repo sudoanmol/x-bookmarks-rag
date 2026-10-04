@@ -165,8 +165,8 @@ def chunks_for_documents(rows: list[sqlite3.Row]) -> list[Chunk]:
         if not body:
             continue
 
-        if row["kind"] == "x_article":
-            source = "article"
+        if row["kind"] in ("x_article", "video"):
+            source = "article" if row["kind"] == "x_article" else "video"
             label = f"@{row['screen_name']}" if row["screen_name"] else "@unknown"
         else:
             source = "link"

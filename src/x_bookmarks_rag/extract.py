@@ -21,6 +21,10 @@ BUNDLE = Path(__file__).parent / "vendor" / "defuddle.bundle.js"
 # Below this, an extraction is treated as failed rather than stored as content.
 THIN_WORDS = 60
 
+# The documents worth serving. A short clip's transcript is real content at
+# any length, so the floor applies to pages only.
+READABLE_SQL = f"(d.word_count >= {THIN_WORDS} OR (d.kind = 'video' AND d.word_count > 0))"
+
 
 # Defuddle runs against `document`, so the page must already be rendered.
 PARSE_JS = """(url) => {

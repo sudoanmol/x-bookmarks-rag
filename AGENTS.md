@@ -5,7 +5,8 @@ bookmarks with a real browser, extracts the full text behind articles and
 links, embeds everything locally, and searches with hybrid retrieval.
 
 No X API. Everything runs on this machine, except two remote services:
-Groq on its free tier, and Modal (owner's free credits) for GPU captioning.
+Groq on its free tier, and Modal (owner's free credits) for GPU captions and
+transcripts.
 
 **This file is the handoff.** Read all of it before you change anything. Many
 rules below cost hours to learn. The reasons are given so you can tell when a
@@ -54,10 +55,11 @@ uv run xbm inspect    # report what the captured data contains
 uv run xbm normalize  # rebuild the DB from raw pages on disk
 uv run xbm extract    # fetch full text behind articles and links
 uv run xbm caption    # vision model on a Modal GPU (--limit, --retry)
+uv run xbm transcribe # Whisper on Modal GPUs (--limit, --retry)
 uv run xbm index      # chunk and embed  (--rebuild to redo everything)
 uv run xbm search "..."  # hybrid search  (-n, --author, --source)
 
-uv run pytest -q      # 103 tests, all offline, ~1s
+uv run pytest -q      # 112 tests, all offline, ~1s
 ```
 
 Ollama must be running, with `embeddinggemma` pulled. That is the only model
@@ -78,6 +80,7 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
                               |
                     extract (Playwright + Defuddle)  ->  documents
                     caption (Modal + vLLM)           ->  captions
+                    transcribe (Modal + Whisper)     ->  documents (kind video)
                               |
                            chunk  ->  embed  ->  chunks + chunk_vec + chunk_fts
                               |
@@ -94,6 +97,7 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
 | `db.py` | Schema and idempotent upserts. Owns **all** tables. |
 | `extract.py` | Renders pages and pulls readable text with Defuddle. |
 | `caption.py` | Modal app (vLLM on one H100) plus the local job and save logic. |
+| `transcribe.py` | Modal app (faster-whisper on up to 8 L4s). Writes `documents` rows. |
 | `chunk.py` | Turns rows, documents, and captions into embeddable pieces. |
 | `embed.py` | Ollama calls. Asymmetric prefixes (see §8). |
 | `index.py` | Builds `chunks`, `chunk_vec`, `chunk_fts`. Owns the vec0 connection. |
@@ -120,9 +124,9 @@ All tables live in `db.py`. `data/bookmarks.db`, WAL mode, `busy_timeout=30000`.
 | `bookmarks` | `tweet_id` PK, `sort_index`, `text`, `is_long`, `lang`, `quoted_text`, `article_id`, `article_title`, `article_preview`, `removed_at`. |
 | `media` | `media_key` PK, `kind` (photo/video/animated_gif), `url`, `alt_text`, `duration_ms`, `bitrate`, **`small_url`/`small_bitrate`**. |
 | `links` | `(tweet_id, url)` PK, `domain`, `title`, `description`, `from_card`. |
-| `documents` | `url` PK, `kind` (x_article/link), `tweet_id`, `title`, `body` (**HTML**), `word_count`, `attempts`, `error`. |
+| `documents` | `url` PK, `kind` (x_article/link/video), `tweet_id`, `title`, `body` (**HTML**), `word_count`, `attempts`, `error`. |
 | `captions` | `media_key` PK, `text`, `model`, `attempts`, `error`. No FK to `media`: `replace_media` deletes and reinserts on every normalize. |
-| `chunks` | `id`, `tweet_id`, `source` (post/quote/article/link/image), `ref`, `position`, `text`, `source_text`, `lang`, `hash`. |
+| `chunks` | `id`, `tweet_id`, `source` (post/quote/article/link/image/video), `ref`, `position`, `text`, `source_text`, `lang`, `hash`. |
 | `chunk_vec` | vec0 virtual table, `FLOAT[768]`. |
 | `chunk_fts` | fts5 external-content table over `chunks`. |
 | `sync_state` | `watermark` = highest `sort_index` seen. |
@@ -149,14 +153,15 @@ Counted on 2026-10-03.
 | Media | 949 — 606 photo, 335 video, 8 gif |
 | Media with alt text | **18** |
 | Links (unique) | 626 |
-| Documents | 789 stored, **683 usable**. Every link has a row. |
+| Documents | 1,119 stored, **819 usable**: 683 pages, 136 transcripts. Every link has a row. |
 | Extracted words | **1,217,416** |
-| Chunks / vectors | 4,297 / 4,297 (608 of them image chunks) |
+| Chunks / vectors | 5,005 / 5,005 (608 image, 708 video) |
 | Captions | **605 of 606** photos. The one failure is a 404 at X. |
-| Video | 51.2 hours: 279 clips under 10 min, 56 over |
+| Video | 335 clips, 51.2 hours. 136 have speech (533k words), 61 have audio but no speech, 133 have no audio track. |
 
-Layers 1 and 2 and image captions are done and working. Search returns real
-passages from extracted pages and OCR text from images, not just post text.
+Layers 1 and 2, image captions, and video transcripts are done and working.
+Search returns real passages from extracted pages, OCR text from images, and
+timestamped transcript text, not just post text.
 
 The unusable documents are mostly "thin extraction" (under the word floor),
 plus 10 binary targets (PDFs). Links are stored under `normalize_url()`, so
@@ -196,8 +201,8 @@ caller reasons.
 **One vector space** for all content types, rather than separate indexes.
 
 **Groq for enrichment, not embeddings.** Groq serves no embedding models.
-Available and relevant: `whisper-large-v3-turbo` (28,800 audio seconds per
-day), `openai/gpt-oss-120b` and `-20b`.
+Available and relevant: `openai/gpt-oss-120b` and `-20b`. Nothing calls Groq
+today.
 
 **Captions run on Modal, not Groq.** The Groq free tier (8,000 tokens per
 minute, serial) needed days for 600 photos. Modal runs the same model,
@@ -205,6 +210,16 @@ minute, serial) needed days for 600 photos. Modal runs the same model,
 15 minutes of GPU and roughly $1. The app is ephemeral (`app.run()`), so it
 stops when `xbm caption` exits. **The owner pays for every GPU second: after
 any Modal run, confirm `modal container list --json` prints `[]`.**
+
+**Transcripts run on Modal too, and are `documents` rows.** faster-whisper
+`large-v3-turbo` on up to 8 L4s did all 51.2 hours in under 6 minutes. This
+replaced the planned Groq + local `mlx-whisper` split: an M3 Pro would need
+about 2 hours. A transcript is a `documents` row with `kind = 'video'`, keyed
+by `https://x.com/<handle>/status/<id>/video/<n>`, with one `<p>` per minute
+led by `[m:ss]`. So chunking, search, and `read_document` (paging and query)
+needed no new code. `READABLE_SQL` exempts transcripts from the 60-word page
+floor. A clip with no speech is stored with `word_count = 0`: done, never
+served.
 
 ---
 
@@ -273,6 +288,12 @@ Each of these cost real time. Do not rediscover them.
     running`. In `zip`, put the generator first.
 22. **Incremental sync stops one page after the watermark hit.** An earlier
     version only stopped when a scroll returned no pages, so it walked all 69.
+23. **faster-whisper 1.2.1 needs PyAV below 19.** PyAV 19 removed the
+    `metadata_errors` argument it passes to `av.open`.
+24. **faster-whisper's `decode_audio` drops invalid data without a word.** A
+    damaged download decodes to nothing and looks silent: a 2-hour podcast
+    came back empty once. The container checks the byte count against
+    `Content-Length`, and treats audio with no detected language as an error.
 
 ---
 
@@ -340,10 +361,8 @@ In the owner's chosen order. Each layer must leave a working product.
 
 1. **Image captions and OCR.** Done. `uv run xbm caption` after each sync
    captions only new photos, then `uv run xbm index`.
-2. **Video transcripts.** 51.2 hours total. Split by length: 279 clips under 10
-   minutes go to Groq `whisper-large-v3-turbo` (free tier gives 28,800 audio
-   seconds per day, so the short set is about half of one day). The 56 long
-   clips run locally with `mlx-whisper`. Use `media.small_url`, never `url`.
+2. **Video transcripts.** Done. `uv run xbm transcribe` after each sync, then
+   `uv run xbm index`. Uses `media.small_url`, never `url`.
 3. **Foreign language translation.** The owner asked for this explicitly.
    Design: `chunks.text` holds English, `chunks.source_text` holds the
    original. Both columns already exist. Note that the `zxx` language bucket is
@@ -355,7 +374,7 @@ In the owner's chosen order. Each layer must leave a working product.
 
 ## 10. How to verify your work
 
-- `uv run pytest -q` — 103 tests, all offline, about one second. Keep it that way.
+- `uv run pytest -q` — 112 tests, all offline, about one second. Keep it that way.
   Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
   `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
 - Run a real query and read the passages:

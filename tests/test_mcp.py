@@ -131,6 +131,30 @@ def test_read_document_search_stays_inside_the_selected_page(mcp_index):
     assert "Needle cache method" in result.passages[0].text
 
 
+def test_a_short_transcript_is_indexed_searchable_and_readable(mcp_index):
+    from x_bookmarks_rag import transcribe as transcribe_mod
+
+    conn = index_mod.connect()
+    jobs = transcribe_mod.pending(conn)
+    transcribe_mod.run(
+        conn,
+        jobs,
+        transcriber=lambda jobs: iter(
+            [{"url": jobs[0].url, "segments": [(0.0, 3.0, "Quantized kernels ship today.")], "lang": "en"}]
+        ),
+    )
+    index_mod.build(conn)
+    conn.close()
+
+    hits = mcp_server.search_bookmarks("quantized kernels", source="video").hits
+    assert [h.tweet_id for h in hits] == ["1002"]
+    assert "[0:00] Quantized kernels ship today." in hits[0].best_chunk
+
+    page = mcp_server.read_document("1002")
+    assert page.documents[0].url == "https://x.com/bob/status/1002/video/1"
+    assert "[0:00] Quantized kernels ship today." in page.text
+
+
 def test_mcp_call_returns_structured_content(mcp_index):
     async def call():
         return await mcp_server.server.call_tool("get_bookmark", {"tweet_id": "1001"})

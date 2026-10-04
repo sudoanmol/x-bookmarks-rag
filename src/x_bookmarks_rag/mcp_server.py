@@ -11,12 +11,12 @@ from . import chunk as chunk_mod
 from . import db
 from . import index as index_mod
 from . import search as search_mod
-from .extract import THIN_WORDS, normalize_url
+from .extract import READABLE_SQL, normalize_url
 
 PAGE_CHARS = 12_000
 PASSAGE_LIMIT = 5
 
-Source = Literal["post", "quote", "article", "link", "image"]
+Source = Literal["post", "quote", "article", "link", "image", "video"]
 SearchLimit = Annotated[int, Field(ge=1, le=50, description="Maximum number of bookmarks to return.")]
 Offset = Annotated[int, Field(ge=0, description="Character offset for document paging.")]
 
@@ -248,7 +248,7 @@ def _find_documents(conn, target: str):
             FROM documents d
             JOIN bookmarks b ON b.tweet_id = d.tweet_id
             WHERE d.url IN ({placeholders}) AND b.removed_at IS NULL
-                  AND d.word_count >= {THIN_WORDS}
+                  AND {READABLE_SQL}
             ORDER BY d.url
             """,
             sorted(urls),
@@ -260,7 +260,7 @@ def _find_documents(conn, target: str):
             FROM documents d
             JOIN bookmarks b ON b.tweet_id = d.tweet_id
             WHERE d.tweet_id = ? AND b.removed_at IS NULL
-                  AND d.word_count >= {THIN_WORDS}
+                  AND {READABLE_SQL}
             ORDER BY d.kind = 'x_article' DESC, d.url
             """,
             (target,),
@@ -310,7 +310,7 @@ def read_document(
                 for row in conn.execute(
                     f"""
                     SELECT id FROM chunks
-                    WHERE ref IN ({placeholders}) AND source IN ('article', 'link')
+                    WHERE ref IN ({placeholders}) AND source IN ('article', 'link', 'video')
                     """,
                     sorted(urls),
                 )

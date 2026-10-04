@@ -207,6 +207,39 @@ def caption(
 
 
 @app.command()
+def transcribe(
+    limit: int = typer.Option(None, "--limit", "-n", help="Stop after this many videos."),
+    retry: bool = typer.Option(False, "--retry", help="Try the failed videos again."),
+) -> None:
+    """Transcribe bookmark videos with Whisper on Modal GPUs."""
+    from . import transcribe as transcribe_mod
+
+    conn = db.connect()
+    jobs = transcribe_mod.pending(conn, retry_failed=retry)
+    if limit:
+        jobs = jobs[-limit:]  # the shortest, so a trial run is cheap
+    if not jobs:
+        console.print("[green]Every video is transcribed.[/green]")
+        return
+
+    hours = sum(j.duration_ms for j in jobs) / 3_600_000
+    console.print(f"[dim]{len(jobs)} videos, {hours:.1f} hours[/dim]")
+
+    # Plain lines, not a status spinner: Modal draws its own live output.
+    def on_progress(done: int, total: int, doc) -> None:
+        mark = "[red]x[/red]" if doc.error else "ok" if doc.word_count else "silent"
+        detail = doc.error or f"{doc.word_count:,} words"
+        console.print(f"{done}/{total} {mark} {doc.url} {detail}")
+
+    tally = transcribe_mod.run(conn, jobs, on_progress=on_progress)
+    conn.close()
+    console.print(
+        f"[green]{tally['ok']:,} transcribed[/green] [dim]{tally['silent']:,} silent, "
+        f"{tally['failed']:,} failed[/dim]"
+    )
+
+
+@app.command()
 def index(
     rebuild: bool = typer.Option(False, "--rebuild", help="Discard chunks and embed everything again."),
 ) -> None:
@@ -229,7 +262,7 @@ def search(
     query: list[str] = typer.Argument(..., help="What you are looking for."),
     limit: int = typer.Option(10, "--limit", "-n"),
     author: str = typer.Option(None, "--author", "-a", help="Restrict to one handle."),
-    source: str = typer.Option(None, "--source", help="post, quote, article, link, or image."),
+    source: str = typer.Option(None, "--source", help="post, quote, article, link, image, or video."),
 ) -> None:
     """Search your bookmarks in natural language."""
     text = " ".join(query)
