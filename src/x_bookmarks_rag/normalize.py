@@ -51,10 +51,8 @@ def normalize(paths: Iterable[Path] | None = None) -> NormalizeResult:
                 tweet_id = record["bookmark"]["tweet_id"]
                 db.upsert_author(conn, record["author"])
                 db.upsert_bookmark(conn, record["bookmark"])
-                if record["media"]:
-                    db.replace_media(conn, tweet_id, record["media"])
-                if record["links"]:
-                    db.replace_links(conn, tweet_id, record["links"])
+                db.replace_media(conn, tweet_id, record["media"])
+                db.replace_links(conn, tweet_id, record["links"])
 
                 result.seen_ids.add(tweet_id)
                 result.bookmarks += 1

@@ -61,7 +61,7 @@ uv run xbm translate  # Groq gpt-oss-120b over foreign chunks
 uv run xbm index      # chunk and embed  (--rebuild, --no-* exclusions)
 uv run xbm search "..."  # hybrid search  (-n, --author, --source)
 
-uv run pytest -q      # 134 tests, all offline, ~1s
+uv run pytest -q      # 137 tests, all offline, ~1s
 ```
 
 Ollama must be running, with `embeddinggemma` pulled. That is the only model
@@ -127,7 +127,8 @@ All tables live in `db.py`. `data/bookmarks.db`, WAL mode, `busy_timeout=30000`.
 | `bookmarks` | `tweet_id` PK, `sort_index`, `text`, `is_long`, `lang`, `quoted_text`, `article_id`, `article_title`, `article_preview`, `removed_at`. |
 | `media` | `media_key` PK, `kind` (photo/video/animated_gif), `url`, `alt_text`, `duration_ms`, `bitrate`, **`small_url`/`small_bitrate`**. |
 | `links` | `(tweet_id, url)` PK, `domain`, `title`, `description`, `from_card`. |
-| `documents` | `url` PK, `kind` (x_article/link/video), `tweet_id`, `title`, `body` (**HTML**), `word_count`, `attempts`, `error`. |
+| `documents` | `url` PK, `kind` (x_article/link/video), `tweet_id` (NULL for links), `title`, `body` (**HTML**), `word_count`, `attempts`, `error`. |
+| `bookmark_documents` | View: which documents each bookmark has. A linked page belongs to **every** bookmark that links it, through `links`. Read documents through this, never `documents.tweet_id`. |
 | `captions` | `media_key` PK, `text`, `model`, `attempts`, `error`. No FK to `media`: `replace_media` deletes and reinserts on every normalize. |
 | `translations` | `hash` PK (of the original chunk text), `source_text`, `text` (NULL = already English), `model`. |
 | `chunks` | `id`, `tweet_id`, `source` (post/quote/article/link/image/video), `ref`, `position`, `text`, `source_text`, `lang`, `hash`. |
@@ -168,8 +169,8 @@ Search returns real passages from extracted pages, OCR text from images, and
 timestamped transcript text, not just post text.
 
 The unusable documents are mostly "thin extraction" (under the word floor),
-plus 10 binary targets (PDFs). Links are stored under `normalize_url()`, so
-compare against `documents.url` through that function, not raw `links.url`.
+plus 10 binary targets (PDFs). `links.url` is stored under `normalize_url()`,
+the same key as `documents.url`, so the two join directly.
 
 ---
 
@@ -309,6 +310,13 @@ Each of these cost real time. Do not rediscover them.
     damaged download decodes to nothing and looks silent: a 2-hour podcast
     came back empty once. The container checks the byte count against
     `Content-Length`, and treats audio with no detected language as an error.
+25. **A linked page has many owners.** 28 URLs are bookmarked more than once.
+    Link documents used to carry the first bookmark's `tweet_id`, so the
+    others could not find or read their own page. Ownership now comes from
+    `links` through the `bookmark_documents` view, and a shared page is
+    chunked once per bookmark.
+26. **A capture with no media or links is the truth.** `normalize` replaces
+    them unconditionally, so a stale photo and its caption leave the index.
 
 ---
 
@@ -415,7 +423,7 @@ In the owner's chosen order. Each layer must leave a working product.
 
 ## 10. How to verify your work
 
-- `uv run pytest -q` — 134 tests, all offline, about one second. Keep it that way.
+- `uv run pytest -q` — 137 tests, all offline, about one second. Keep it that way.
   Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
   `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
 - Run a real query and read the passages:

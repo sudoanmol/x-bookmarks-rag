@@ -12,7 +12,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 from . import db
 
@@ -40,8 +40,6 @@ PARSE_JS = """(url) => {
     };
 }"""
 
-TRACKING = re.compile(r"^(utm_|ref_?$|ref_src|ref_url|s|t|si|feature|__twitter)", re.I)
-
 # X serves an article's real text inside these GraphQL operations. It is the
 # authoritative copy, and cheap to capture while the page loads anyway.
 ARTICLE_OPS = ("TweetResultByRestId", "TweetDetail")
@@ -64,28 +62,6 @@ class Document:
     word_count: int = 0
     lang: str | None = None
     error: str | None = None
-
-
-def normalize_url(url: str) -> str:
-    """Make a URL fetchable and comparable.
-
-    arXiv PDF links start a download instead of rendering, so they are pointed
-    at the abstract page. Tracking parameters are dropped so the same article
-    saved twice is one document.
-    """
-    parts = urlparse(url)
-    host = parts.netloc.lower().removeprefix("www.")
-    path = parts.path
-
-    if host == "arxiv.org" and path.startswith("/pdf/"):
-        path = "/abs/" + path.removeprefix("/pdf/").removesuffix(".pdf")
-
-    kept = [
-        pair
-        for pair in parts.query.split("&")
-        if pair and not TRACKING.match(pair.split("=", 1)[0])
-    ]
-    return urlunparse((parts.scheme or "https", host, path, "", "&".join(kept), ""))
 
 
 def looks_like_a_file(url: str) -> bool:
@@ -255,10 +231,9 @@ SELECT b.tweet_id, a.screen_name AS handle
 """
 
 LINK_SQL = """
-SELECT l.url, MIN(l.tweet_id) AS tweet_id
+SELECT DISTINCT l.url
   FROM links l JOIN bookmarks b ON b.tweet_id = l.tweet_id
  WHERE b.removed_at IS NULL
- GROUP BY l.url
 """
 
 
@@ -293,14 +268,11 @@ def pending(conn: sqlite3.Connection, *, retry_failed: bool = False) -> list[Job
         if wanted(url):
             jobs.append(Job(url, "x_article", row["tweet_id"]))
 
-    seen: set[str] = set()
+    # A link document has no tweet_id: several bookmarks can share one page,
+    # and the links table says which (see db.bookmark_documents).
     for row in conn.execute(LINK_SQL):
-        url = normalize_url(row["url"])
-        if url in seen:
-            continue
-        seen.add(url)
-        if wanted(url):
-            jobs.append(Job(url, "link", row["tweet_id"]))
+        if wanted(row["url"]):
+            jobs.append(Job(row["url"], "link"))
 
     return jobs
 

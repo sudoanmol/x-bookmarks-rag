@@ -50,10 +50,11 @@ WHERE b.removed_at IS NULL
 """
 
 DOCUMENT_SQL = f"""
-SELECT d.url, d.kind, d.tweet_id, d.title, d.body, d.lang, d.site,
+SELECT d.url, d.kind, bd.tweet_id, d.title, d.body, d.lang, d.site,
        a.screen_name
 FROM documents d
-JOIN bookmarks b ON b.tweet_id = d.tweet_id
+JOIN bookmark_documents bd USING(url)
+JOIN bookmarks b ON b.tweet_id = bd.tweet_id
 LEFT JOIN authors a USING(author_id)
 WHERE b.removed_at IS NULL AND {READABLE_SQL}
 """

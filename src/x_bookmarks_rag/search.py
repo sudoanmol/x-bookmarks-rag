@@ -199,8 +199,8 @@ def search(
                b.url, b.text, b.created_at, b.lang,
                a.screen_name,
                (SELECT COUNT(*) FROM chunks WHERE tweet_id = b.tweet_id) AS chunk_count,
-               (SELECT COALESCE(SUM(word_count), 0) FROM documents
-                 WHERE tweet_id = b.tweet_id) AS doc_words,
+               (SELECT COALESCE(SUM(d.word_count), 0) FROM bookmark_documents bd
+                 JOIN documents d USING(url) WHERE bd.tweet_id = b.tweet_id) AS doc_words,
                (SELECT GROUP_CONCAT(DISTINCT kind) FROM media WHERE tweet_id = b.tweet_id) AS media
         FROM chunks c
         JOIN bookmarks b USING(tweet_id)

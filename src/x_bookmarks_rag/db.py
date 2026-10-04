@@ -119,6 +119,14 @@ CREATE INDEX IF NOT EXISTS idx_documents_depth ON documents(depth);
 
 DROP TABLE IF EXISTS enrichment;
 
+-- Which documents each bookmark has. Articles and transcripts belong to one
+-- post; a linked page belongs to every post that links to it.
+DROP VIEW IF EXISTS bookmark_documents;
+CREATE VIEW bookmark_documents AS
+    SELECT tweet_id, url FROM documents WHERE kind != 'link'
+    UNION
+    SELECT tweet_id, url FROM links;
+
 CREATE TABLE IF NOT EXISTS captions (
     media_key  TEXT PRIMARY KEY,
     text       TEXT NOT NULL DEFAULT '',

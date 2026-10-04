@@ -191,3 +191,15 @@ def test_ordinary_posts_have_no_article_fields(records):
 def test_internal_x_article_link_is_not_a_link_row(records):
     """The article is tracked by article_id, so its x.com URL is not a link."""
     assert records["1004"]["links"] == []
+
+
+def test_links_are_stored_under_the_document_key():
+    # Documents are keyed by normalize_url, so links must be too, or the two
+    # stop joining.
+    tweet = {
+        "rest_id": "1",
+        "legacy": {"entities": {"urls": [
+            {"url": "https://t.co/x", "expanded_url": "https://www.example.com/a?utm_source=x"},
+        ]}},
+    }
+    assert [link["url"] for link in parse.extract_links(tweet)] == ["https://example.com/a"]

@@ -6,11 +6,36 @@ disk, so it can be re-run after any parser fix without scrolling X again.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Iterator
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 TWEET_TYPES = {"Tweet", "TweetWithVisibilityResults"}
+
+TRACKING = re.compile(r"^(utm_|ref_?$|ref_src|ref_url|s|t|si|feature|__twitter)", re.I)
+
+
+def normalize_url(url: str) -> str:
+    """Make a URL fetchable and comparable.
+
+    arXiv PDF links start a download instead of rendering, so they are pointed
+    at the abstract page. Tracking parameters are dropped so the same article
+    saved twice is one document.
+    """
+    parts = urlparse(url)
+    host = parts.netloc.lower().removeprefix("www.")
+    path = parts.path
+
+    if host == "arxiv.org" and path.startswith("/pdf/"):
+        path = "/abs/" + path.removeprefix("/pdf/").removesuffix(".pdf")
+
+    kept = [
+        pair
+        for pair in parts.query.split("&")
+        if pair and not TRACKING.match(pair.split("=", 1)[0])
+    ]
+    return urlunparse((parts.scheme or "https", host, path, "", "&".join(kept), ""))
 
 
 # --------------------------------------------------------------------------
@@ -191,6 +216,8 @@ def _card_values(tweet: dict) -> dict[str, Any]:
 
 
 def _blank_link(tweet_id: str, url: str) -> dict:
+    # Stored under the same key as its documents row, so the two join directly.
+    url = normalize_url(url)
     return {
         "tweet_id": tweet_id,
         "url": url,

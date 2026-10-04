@@ -184,3 +184,21 @@ def test_mcp_call_returns_structured_content(mcp_index):
     result = anyio.run(call)
     assert result.structured_content["tweet_id"] == "1001"
     assert result.structured_content["author"]["screen_name"] == "@alice"
+
+
+def test_a_page_shared_by_two_bookmarks_belongs_to_both(mcp_index):
+    conn = index_mod.connect()
+    conn.execute(
+        "INSERT INTO links(tweet_id, url, domain) VALUES('1002', 'https://example.com/post', 'example.com')"
+    )
+    conn.commit()
+    index_mod.build(conn)
+    conn.close()
+
+    hits = {hit.tweet_id: hit for hit in mcp_server.search_bookmarks("needle cache", limit=10).hits}
+    assert hits["1002"].best_ref == "https://example.com/post"
+    assert mcp_server.read_document("1002").documents[0].url == "https://example.com/post"
+
+    # The page is chunked once per bookmark, but read once.
+    passages = mcp_server.read_document("https://example.com/post", query="needle cache").passages
+    assert len({p.position for p in passages}) == len(passages)

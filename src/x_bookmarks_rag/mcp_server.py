@@ -12,7 +12,8 @@ from . import chunk as chunk_mod
 from . import db
 from . import index as index_mod
 from . import search as search_mod
-from .extract import READABLE_SQL, normalize_url
+from .extract import READABLE_SQL
+from .parse import normalize_url
 
 PAGE_CHARS = 12_000
 PASSAGE_LIMIT = 5
@@ -284,9 +285,10 @@ def _find_documents(conn, target: str):
         placeholders = ",".join("?" for _ in urls)
         rows = conn.execute(
             f"""
-            SELECT d.url, d.kind, d.title, d.body, d.word_count
+            SELECT DISTINCT d.url, d.kind, d.title, d.body, d.word_count
             FROM documents d
-            JOIN bookmarks b ON b.tweet_id = d.tweet_id
+            JOIN bookmark_documents bd USING(url)
+            JOIN bookmarks b ON b.tweet_id = bd.tweet_id
             WHERE d.url IN ({placeholders}) AND b.removed_at IS NULL
                   AND {READABLE_SQL}
             ORDER BY d.url
@@ -298,8 +300,9 @@ def _find_documents(conn, target: str):
             f"""
             SELECT d.url, d.kind, d.title, d.body, d.word_count
             FROM documents d
-            JOIN bookmarks b ON b.tweet_id = d.tweet_id
-            WHERE d.tweet_id = ? AND b.removed_at IS NULL
+            JOIN bookmark_documents bd USING(url)
+            JOIN bookmarks b ON b.tweet_id = bd.tweet_id
+            WHERE bd.tweet_id = ? AND b.removed_at IS NULL
                   AND {READABLE_SQL}
             ORDER BY d.kind = 'x_article' DESC, d.url
             """,
@@ -356,8 +359,9 @@ def read_document(
                 row["id"]
                 for row in conn.execute(
                     f"""
-                    SELECT id FROM chunks
+                    SELECT MIN(id) AS id FROM chunks
                     WHERE ref IN ({placeholders}) AND source IN ('article', 'link', 'video')
+                    GROUP BY ref, position
                     """,
                     sorted(urls),
                 )

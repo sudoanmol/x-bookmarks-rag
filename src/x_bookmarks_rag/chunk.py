@@ -15,7 +15,6 @@ from dataclasses import dataclass
 
 from markdownify import markdownify
 
-from .extract import normalize_url
 
 # EmbeddingGemma holds 2048 tokens. Roughly four characters per token, kept well
 # under the ceiling so the author prefix and framing always fit.
@@ -104,7 +103,7 @@ def chunks_for_links(rows: list[sqlite3.Row], *, covered: set[str] | None = None
     """
     out: list[Chunk] = []
     for row in rows:
-        if covered and normalize_url(row["url"]) in covered:
+        if covered and row["url"] in covered:
             continue
         body = " — ".join(p for p in (row["title"], row["description"]) if p)
         if not body:

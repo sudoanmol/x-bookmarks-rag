@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from x_bookmarks_rag import extract
+from x_bookmarks_rag import extract, parse
 
 
 # --------------------------------------------------------------------------
@@ -23,22 +23,22 @@ from x_bookmarks_rag import extract
     ],
 )
 def test_normalize_url(raw, expected):
-    assert extract.normalize_url(raw) == expected
+    assert parse.normalize_url(raw) == expected
 
 
 def test_tracking_parameters_are_dropped_so_duplicates_collapse():
-    a = extract.normalize_url("https://example.com/a?utm_source=x&utm_medium=y")
-    b = extract.normalize_url("https://example.com/a")
+    a = parse.normalize_url("https://example.com/a?utm_source=x&utm_medium=y")
+    b = parse.normalize_url("https://example.com/a")
     assert a == b
 
 
 def test_meaningful_query_parameters_survive():
-    url = extract.normalize_url("https://example.com/search?q=rust&page=2")
+    url = parse.normalize_url("https://example.com/search?q=rust&page=2")
     assert "q=rust" in url and "page=2" in url
 
 
 def test_fragments_are_dropped():
-    assert "#" not in extract.normalize_url("https://example.com/a#section")
+    assert "#" not in parse.normalize_url("https://example.com/a#section")
 
 
 @pytest.mark.parametrize(

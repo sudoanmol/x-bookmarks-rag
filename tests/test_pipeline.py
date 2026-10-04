@@ -123,3 +123,33 @@ def test_report_renders_without_error(workspace):
     stats = inspect_mod.gather(conn)
     conn.close()
     inspect_mod.render(stats)
+
+
+def _strip(node, tweet_id):
+    """Drop media and links from one tweet, as if X now showed none."""
+    if isinstance(node, dict):
+        if node.get("rest_id") == tweet_id and "legacy" in node:
+            node["legacy"].pop("extended_entities", None)
+            node["legacy"].pop("entities", None)
+        for value in node.values():
+            _strip(value, tweet_id)
+    elif isinstance(node, list):
+        for value in node:
+            _strip(value, tweet_id)
+
+
+def test_a_later_capture_with_no_media_or_links_clears_them(workspace):
+    normalize_mod.normalize()
+    conn = db.connect()
+    assert conn.execute("SELECT COUNT(*) FROM media WHERE tweet_id = '1001'").fetchone()[0]
+    assert conn.execute("SELECT COUNT(*) FROM links WHERE tweet_id = '1001'").fetchone()[0]
+
+    page = fixtures.page()
+    _strip(page, "1001")
+    run_dir = config.RAW_DIR / "run2"
+    run_dir.mkdir()
+    (run_dir / "page-0001.json").write_text(json.dumps(page))
+    normalize_mod.normalize()
+
+    assert conn.execute("SELECT COUNT(*) FROM media WHERE tweet_id = '1001'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM links WHERE tweet_id = '1001'").fetchone()[0] == 0

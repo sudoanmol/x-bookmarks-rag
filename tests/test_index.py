@@ -211,11 +211,10 @@ def test_a_card_is_dropped_when_its_page_was_extracted():
     from x_bookmarks_rag import chunk as chunk_mod
 
     rows = [
-        {"tweet_id": "1", "url": "https://www.example.com/a?utm_source=x",
+        {"tweet_id": "1", "url": "https://example.com/a",
          "domain": "example.com", "title": "T", "description": "D"}
     ]
     assert chunk_mod.chunks_for_links(rows) != []
-    # The document was stored under the normalized URL.
     assert chunk_mod.chunks_for_links(rows, covered={"https://example.com/a"}) == []
 
 
