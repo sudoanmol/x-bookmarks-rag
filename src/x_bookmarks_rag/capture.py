@@ -122,6 +122,7 @@ def capture(
                     except Exception:
                         continue
 
+                hit_before = result.stop_reason == "watermark"
                 for payload in new_pages:
                     result.pages += 1
                     path = raw_dir / f"page-{result.pages:04d}.json"
@@ -156,7 +157,7 @@ def capture(
                     last_cursor = cursor or last_cursor
 
                 # A watermark hit reads one extra page for safety, then stops.
-                if result.stop_reason == "watermark" and not new_pages:
+                if result.stop_reason == "watermark" and (hit_before or not new_pages):
                     break
                 if result.stop_reason == "end_of_list":
                     break
