@@ -83,3 +83,13 @@ def test_blocks_without_text_are_tolerated():
 def test_content_state_survives_a_list_in_the_path():
     payload = {"data": {"items": [{"x": 1}, _payload([{"text": "deep"}])]}}
     assert extract.article_text(payload) == "deep"
+
+
+def test_run_raises_when_a_worker_crashes(monkeypatch):
+    def crash(_lane, _report):
+        raise OSError("no browser")
+
+    monkeypatch.setattr(extract, "_worker", crash)
+    job = extract.Job(url="https://example.com", kind="link", tweet_id="1")
+    with pytest.raises(RuntimeError, match="no browser"):
+        extract.run(None, [job])

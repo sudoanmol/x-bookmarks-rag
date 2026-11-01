@@ -300,6 +300,7 @@ def run(conn: sqlite3.Connection, jobs: list[Job], *, on_progress=None) -> dict[
     tally = {"ok": 0, "failed": 0}
     done = [0]
     total = len(jobs)
+    crashes: list[Exception] = []
 
     def report(doc: Document) -> None:
         with lock:
@@ -313,8 +314,14 @@ def run(conn: sqlite3.Connection, jobs: list[Job], *, on_progress=None) -> dict[
     lanes = [articles[i::ARTICLE_WORKERS] for i in range(ARTICLE_WORKERS)]
     lanes += [links[i::WORKERS] for i in range(WORKERS)]
 
+    def lane_runner(lane: list[Job]) -> None:
+        try:
+            _worker(lane, report)
+        except Exception as exc:
+            crashes.append(exc)
+
     threads = [
-        threading.Thread(target=_worker, args=(lane, report), daemon=True)
+        threading.Thread(target=lane_runner, args=(lane,), daemon=True)
         for lane in lanes
         if lane
     ]
@@ -323,6 +330,10 @@ def run(conn: sqlite3.Connection, jobs: list[Job], *, on_progress=None) -> dict[
     for t in threads:
         t.join()
 
+    # A dead worker leaves its jobs unreported, so a tally alone would read as
+    # a clean run with nothing to do.
+    if crashes:
+        raise RuntimeError(f"{len(crashes)} of {len(threads)} workers crashed: {crashes[0]}")
     return tally
 
 
