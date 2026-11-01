@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
 import typer
 from playwright.sync_api import sync_playwright
 from rich.console import Console
+from rich.markup import escape
 
 from . import capture as capture_mod
 from . import extract as extract_mod
@@ -21,7 +23,7 @@ app = typer.Typer(
     help="Search your X bookmarks in natural language.",
     no_args_is_help=True,
 )
-console = Console()
+console = Console(log_path=False)
 
 
 @app.command(rich_help_panel="Setup")
@@ -50,20 +52,21 @@ def _capture(full: bool, max_pages: int, headed: bool) -> None:
     mode = "full walk" if full else ("incremental" if watermark else "first run")
     console.print(f"[cyan]Capturing bookmarks ({mode}).[/cyan]")
 
-    with console.status("Loading the bookmarks timeline...") as status:
-        def on_page(page_no: int, new: int, total: int) -> None:
-            status.update(f"Page {page_no}: +{new} posts, {total} captured")
+    console.log("Loading the bookmarks timeline.")
 
-        try:
-            result = capture_mod.capture(
-                full=full,
-                max_pages=max_pages or None,
-                headless=not headed,
-                on_page=on_page,
-            )
-        except session.SessionExpired as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1)
+    def on_page(page_no: int, new: int, total: int) -> None:
+        console.log(f"Page {page_no}: +{new} posts, {total} captured")
+
+    try:
+        result = capture_mod.capture(
+            full=full,
+            max_pages=max_pages or None,
+            headless=not headed,
+            on_page=on_page,
+        )
+    except session.SessionExpired as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
 
     console.print(
         f"[green]Captured {result.entries} posts across {result.pages} pages[/green] "
@@ -160,8 +163,10 @@ def sync(
         if enabled and not enabled[0]:
             continue
         console.rule(f"[bold]{name}", align="left")
+        started = time.monotonic()
         try:
             run()
+            console.log(f"[dim]{name} finished in {time.monotonic() - started:.0f}s[/dim]")
         except Exception as exc:  # typer.Exit included: one stage must not sink the rest
             if not isinstance(exc, typer.Exit):
                 console.print(f"[red]{name} failed: {type(exc).__name__}: {exc}[/red]")
@@ -276,12 +281,12 @@ def _extract(kinds: set[str], limit: int | None = None, retry: bool = False) -> 
     articles = sum(1 for j in jobs if j.kind == "x_article")
     console.print(f"[dim]{articles} articles, {len(jobs) - articles} links[/dim]")
 
-    with console.status("Extracting...") as status:
-        def on_progress(done: int, total: int, doc) -> None:
-            mark = "[red]x[/red]" if doc.error and not doc.body else "[green]ok[/green]"
-            status.update(f"{done}/{total} {mark} {doc.url[:70]}")
+    def on_progress(done: int, total: int, doc) -> None:
+        failed = doc.error and not doc.body
+        mark = f"[red]x {escape(doc.error)}[/red]" if failed else f"[green]ok[/green] {doc.word_count:,} words"
+        console.log(f"{done}/{total} {escape(doc.url)} {mark}")
 
-        tally = extract_mod.run(conn, jobs, on_progress=on_progress)
+    tally = extract_mod.run(conn, jobs, on_progress=on_progress)
     conn.close()
     console.print(f"[green]{tally['ok']:,} extracted[/green] [dim]{tally['failed']:,} failed[/dim]")
 
@@ -303,14 +308,14 @@ def _caption(limit: int | None = None, retry: bool = False, wait_for_batch: bool
         )
         return
 
-    console.print(f"[dim]{len(jobs)} photos[/dim]")
+    console.log(f"{len(jobs)} photos. Starting an H100; vLLM takes 5 to 8 minutes to load.")
 
     # Plain lines, not a status spinner: Modal draws its own live output.
     def on_progress(done: int, total: int, cap) -> None:
         if cap.error:
-            console.print(f"[red]x[/red] {cap.media_key}: {cap.error}")
+            console.log(f"[red]x[/red] {cap.media_key}: {escape(cap.error)}")
         if done % caption_mod.BATCH == 0 or done == total:
-            console.print(f"{done}/{total}")
+            console.log(f"{done}/{total} photos")
 
     tally = caption_mod.run(conn, jobs, on_progress=on_progress)
     conn.close()
@@ -329,13 +334,13 @@ def _transcribe(limit: int | None = None, retry: bool = False) -> None:
         return
 
     hours = sum(j.duration_ms for j in jobs) / 3_600_000
-    console.print(f"[dim]{len(jobs)} videos, {hours:.1f} hours[/dim]")
+    console.log(f"{len(jobs)} videos, {hours:.1f} hours. Starting L4 GPUs; about a minute to load.")
 
     # Plain lines, not a status spinner: Modal draws its own live output.
     def on_progress(done: int, total: int, doc) -> None:
         mark = "[red]x[/red]" if doc.error else "ok" if doc.word_count else "silent"
-        detail = doc.error or f"{doc.word_count:,} words"
-        console.print(f"{done}/{total} {mark} {doc.url} {detail}")
+        detail = escape(doc.error or f"{doc.word_count:,} words")
+        console.log(f"{done}/{total} {mark} {escape(doc.url)} {detail}")
 
     tally = transcribe_mod.run(conn, jobs, on_progress=on_progress)
     conn.close()
@@ -358,11 +363,11 @@ def _translate(exclude: frozenset[str] = frozenset()) -> None:
         console.print("[green]Nothing new to translate.[/green]")
         return
 
-    console.print(f"[dim]{len(jobs)} candidate chunks[/dim]")
+    console.log(f"{len(jobs)} candidate chunks")
 
     def on_progress(done: int, total: int, piece, error) -> None:
-        mark = f"[red]x {error}[/red]" if error else "ok"
-        console.print(f"{done}/{total} {mark} {piece.source} {piece.tweet_id} {piece.lang}")
+        mark = f"[red]x {escape(error)}[/red]" if error else "ok"
+        console.log(f"{done}/{total} {mark} {piece.source} {piece.tweet_id} {piece.lang}")
 
     tally = translate_mod.run(conn, jobs, on_progress=on_progress)
     conn.close()
@@ -374,13 +379,14 @@ def _translate(exclude: frozenset[str] = frozenset()) -> None:
 
 def _index(rebuild: bool = False, exclude: frozenset[str] = frozenset(), translated: bool = True) -> None:
     conn = index_mod.connect()
-    with console.status("Indexing...") as status:
-        def on_progress(stage: str, done: int, total: int) -> None:
-            status.update(f"{stage}: {done}/{total}")
+    console.log("Comparing chunks with the index.")
 
-        stats = index_mod.build(
-            conn, rebuild=rebuild, exclude=exclude, translated=translated, on_progress=on_progress
-        )
+    def on_progress(stage: str, done: int, total: int) -> None:
+        console.log(f"{stage}: {done}/{total}")
+
+    stats = index_mod.build(
+        conn, rebuild=rebuild, exclude=exclude, translated=translated, on_progress=on_progress
+    )
     conn.close()
     console.print(
         f"[green]{stats['chunks']:,} chunks, {stats['embedded']:,} embedded[/green] "
