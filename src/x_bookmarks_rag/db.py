@@ -121,8 +121,7 @@ DROP TABLE IF EXISTS enrichment;
 
 -- Which documents each bookmark has. Articles and transcripts belong to one
 -- post; a linked page belongs to every post that links to it.
-DROP VIEW IF EXISTS bookmark_documents;
-CREATE VIEW bookmark_documents AS
+CREATE VIEW IF NOT EXISTS bookmark_documents AS
     SELECT tweet_id, url FROM documents WHERE kind != 'link'
     UNION
     SELECT tweet_id, url FROM links;
