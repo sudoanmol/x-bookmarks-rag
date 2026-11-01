@@ -41,8 +41,7 @@ below cannot be shown to help.
 | 9 | **Add the post's text to its linked-page chunks.** | The post says why the owner saved it and the page says what it is, but page chunks do not include the post. Test this separately from #8. | Small |
 | 10 | **Try smaller chunks**, about 2,000 characters. | Long pages are cut at 4,800, and large chunks can blur the match. This would also shrink responses. Keep it only if the test set improves. | Small |
 | 11 | **Fix the failing sources.** | 10 of 21 YouTube documents and 10 Google Docs failed extraction. YouTube captions and the Docs export URL could cover these. | Medium |
-| 12 | **Caption video keyframes and GIFs.** | 194 clips have no speech, so nothing inside them is searchable. 27 of those bookmarks also have under 80 characters of post text, so they are nearly unfindable. This costs GPU time. | Medium |
-| 13 | **Try a local reranker.** | It could help the top few results, but it adds a dependency and latency. Add it only if the test set shows a gap the other changes do not close. | Medium |
+| 12 | **Try a local reranker.** | It could help the top few results, but it adds a dependency and latency. Add it only if the test set shows a gap the other changes do not close. | Medium |
 
 ## New features
 
@@ -63,6 +62,10 @@ checked.
 
 ## What to skip
 
+- **Video visuals, GIF captions, and visual similarity.** Frames from 15 clips
+  with no speech held one real piece of information not in the post, two minor
+  ones, and one clip that frames would help find. The other 11 added nothing.
+  Only 25 of 217 such clips have both a short post and no extracted page.
 - **Larger candidate pool.** The 80 + 80 candidates already give 58 to 98
   distinct bookmarks, and the default limit is 10.
 - **Stopword removal.** On the one query tested, all 10 top keyword hits still
@@ -82,4 +85,4 @@ checked.
 4. **Agent UX.** Do #1, #2, and #5, which are the biggest day-to-day gain for
    agents.
 5. **Later, if the data supports it.** Do #3 and #4 whenever browsing is wanted.
-   Do #10 to #13 only where the test set shows they help.
+   Do #10 to #12 only where the test set shows they help.

@@ -27,7 +27,7 @@ These come from the owner. They override your defaults.
 | Use `trash`, never `rm`. | A hook blocks `rm`. |
 | Never pass `-c user.email` or `-c user.name` to git. | The global git config is already correct. The owner had to clean up commits once because of this. |
 | Never commit secrets. `.env` holds `GROQ_API_KEY`. | |
-| Push only when the owner asks. The repo is local and has never been pushed. | |
+| Push only when the owner asks. | |
 | Do not add backward compatibility, fallbacks, or migrations. Remove the old path. | Owner's rule. See §6, lesson 11, for how schema changes are done here. |
 | Do not build speculative abstractions. Build the simplest thing that fully meets the requirement. | Owner's rule: "refuse to solve problems we don't have". |
 | Measure before you design. Look at the real data first. | Every good decision in this repo came from doing this. Every mistake came from skipping it. |
