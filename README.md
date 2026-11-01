@@ -21,6 +21,16 @@ Each result is the passage that matched, not just the post.
 
 No X API. Embedding and search run on your machine.
 
+### What is left out
+
+These gaps are on purpose. Daily use does not need them.
+
+- **Video visuals.** Frames are never looked at, so a clip is searchable only
+  through its speech and the post text.
+- **GIFs.** They are not captioned.
+- **Visual similarity.** A photo is found only through its caption and OCR text,
+  not by how it looks.
+
 ## Pipeline
 
 ```mermaid
@@ -72,20 +82,28 @@ Each remote service is optional. Leave out what you do not want (see
 ```sh
 git clone https://github.com/sudoanmol/x-bookmarks-rag
 cd x-bookmarks-rag
-uv sync
-uv run playwright install chromium
+uv tool install --editable .
+"$(uv tool dir)/x-bookmarks-rag/bin/playwright" install chromium
 ollama pull embeddinggemma
-uv run modal setup        # captions and transcripts
+uvx modal setup           # captions and transcripts
 cp .env.example .env      # then set GROQ_API_KEY, for translation
 ```
+
+This puts `xbm` and `xbm-mcp` on your `PATH`, so they work from any directory.
+If your shell cannot find them, run `uv tool update-shell` and open a new
+terminal.
+
+Keep the clone where it is: the install is editable, and `.env` and `data/`
+live in the repository. Code changes apply at once. After a dependency changes,
+run `uv tool install --editable --force .` from the clone.
 
 ## Use
 
 ```sh
-uv run xbm login          # opens a browser; sign in to X once
-uv run xbm sync           # capture, enrich, and index what is new
-uv run xbm search "the article about kv caching"
-uv run xbm status         # coverage per stage, and what each stage needs
+xbm login          # opens a browser; sign in to X once
+xbm sync           # capture, enrich, and index what is new
+xbm search "the article about kv caching"
+xbm status         # coverage per stage, and what each stage needs
 ```
 
 `xbm sync` runs every stage in order: capture, extract, caption, transcribe,
@@ -95,11 +113,11 @@ still reach the index, and the command exits non-zero.
 Search options:
 
 ```sh
-uv run xbm search "postgres connection pooling" -n 5
-uv run xbm search "design systems" --author shadcn
-uv run xbm search "the slide with the pricing table" --source image
-uv run xbm search "what did he say about HBM" --source video
-uv run xbm search "agent harnesses" --after 2026-09-01 --before 2026-10-01
+xbm search "postgres connection pooling" -n 5
+xbm search "design systems" --author shadcn
+xbm search "the slide with the pricing table" --source image
+xbm search "what did he say about HBM" --source video
+xbm search "agent harnesses" --after 2026-09-01 --before 2026-10-01
 ```
 
 Filters apply before ranking, so a filtered search draws on every match, not
@@ -108,13 +126,13 @@ just the ones that ranked high overall. Dates are post dates.
 Each stage is also its own command, for reruns and repairs:
 
 ```sh
-uv run xbm capture        # capture only
-uv run xbm extract        # pages and X Articles   (--limit, --retry)
-uv run xbm caption        # photos                 (--limit, --retry)
-uv run xbm transcribe     # videos                 (--limit, --retry)
-uv run xbm translate      # foreign chunks
-uv run xbm index          # chunk and embed        (--rebuild)
-uv run xbm normalize      # rebuild the database from raw pages
+xbm capture        # capture only
+xbm extract        # pages and X Articles   (--limit, --retry)
+xbm caption        # photos                 (--limit, --retry)
+xbm transcribe     # videos                 (--limit, --retry)
+xbm translate      # foreign chunks
+xbm index          # chunk and embed        (--rebuild)
+xbm normalize      # rebuild the database from raw pages
 ```
 
 Two rules keep GPU spend down:
@@ -139,9 +157,9 @@ translate = true               # false indexes foreign text as written
 `xbm sync` and `xbm index` both read it. Flags add to it for one run:
 
 ```sh
-uv run xbm sync --no-images          # config, plus no photos this run
-uv run xbm sync --no-videos --no-translate
-uv run xbm index --no-links
+xbm sync --no-images          # config, plus no photos this run
+xbm sync --no-videos --no-translate
+xbm index --no-links
 ```
 
 | Flag | Leaves out |
@@ -166,12 +184,10 @@ Include it again and the next `xbm index` brings it back.
 | `get_bookmark(tweet_id)` | Full post, quoted post, author, links, and media with captions. Never document bodies. |
 | `read_document(tweet_id_or_url, query, offset)` | The page or transcript behind a bookmark. With `query`, the best passages inside it. Without, bounded pages with `has_more`. |
 
-Replace the path below with where you cloned the repository.
-
 ### Claude Code
 
 ```sh
-claude mcp add --scope user x-bookmarks -- uv run --project ~/path/to/x-bookmarks-rag xbm-mcp
+claude mcp add --scope user x-bookmarks -- xbm-mcp
 ```
 
 Check it with `claude mcp list`, or `/mcp` inside a session.
@@ -179,7 +195,7 @@ Check it with `claude mcp list`, or `/mcp` inside a session.
 ### Codex
 
 ```sh
-codex mcp add x-bookmarks -- uv run --project ~/path/to/x-bookmarks-rag xbm-mcp
+codex mcp add x-bookmarks -- xbm-mcp
 ```
 
 Check it with `codex mcp list`.
@@ -212,6 +228,7 @@ expires, capture stops with an error instead of reporting zero bookmarks.
 ## Development
 
 ```sh
+uv sync
 uv run pytest -q          # offline, about one second
 ```
 
