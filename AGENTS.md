@@ -5,8 +5,10 @@ bookmarks with a real browser, extracts the full text behind articles and
 links, embeds everything locally, and searches with hybrid retrieval.
 
 No X API. Everything runs on this machine, except two remote services:
-Groq on its free tier, and Modal (owner's free credits) for GPU captions and
-transcripts.
+Groq on its free tier for translation, and Modal (owner's free credits) for GPU
+captions and transcripts.
+
+The pipeline and MCP server are done. Only the web UI remains (§9).
 
 **This file is the handoff.** Read all of it before you change anything. Many
 rules below cost hours to learn. The reasons are given so you can tell when a
@@ -26,12 +28,9 @@ These come from the owner. They override your defaults.
 | Never pass `-c user.email` or `-c user.name` to git. | The global git config is already correct. The owner had to clean up commits once because of this. |
 | Never commit secrets. `.env` holds `GROQ_API_KEY`. | |
 | Push only when the owner asks. The repo is local and has never been pushed. | |
-| Do not add backward compatibility, fallbacks, or migrations. Remove the old path. | Owner's rule. See §7 for how schema changes are done here. |
+| Do not add backward compatibility, fallbacks, or migrations. Remove the old path. | Owner's rule. See §6, lesson 11, for how schema changes are done here. |
 | Do not build speculative abstractions. Build the simplest thing that fully meets the requirement. | Owner's rule: "refuse to solve problems we don't have". |
 | Measure before you design. Look at the real data first. | Every good decision in this repo came from doing this. Every mistake came from skipping it. |
-
-The owner writes and expects **ASD-STE100 Simplified Technical English**: short
-sentences, active voice, one meaning per word.
 
 ### The session file
 
@@ -61,11 +60,15 @@ uv run xbm translate  # Groq gpt-oss-120b over foreign chunks
 uv run xbm index      # chunk and embed  (--rebuild, --no-* exclusions)
 uv run xbm search "..."  # hybrid search  (-n, --author, --source)
 
-uv run pytest -q      # 137 tests, all offline, ~1s
+uv run pytest -q      # 138 tests, all offline, ~1s
 ```
 
 Ollama must be running, with `embeddinggemma` pulled. That is the only model
 the project needs.
+
+The owner also has a global `xbm` and `xbm-mcp`, from
+`uv tool install --editable .`. Run that with `--force` after a dependency
+changes. See §6, lesson 28.
 
 ---
 
@@ -83,6 +86,7 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
                     extract (Playwright + Defuddle)  ->  documents
                     caption (Modal + vLLM)           ->  captions
                     transcribe (Modal + Whisper)     ->  documents (kind video)
+                    translate (Groq)                 ->  translations
                               |
                            chunk  ->  embed  ->  chunks + chunk_vec + chunk_fts
                               |
@@ -91,7 +95,7 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
 
 | Module | Job |
 | --- | --- |
-| `config.py` | Paths, URLs, pacing. Loads `.env` by **explicit path** (see §8). |
+| `config.py` | Paths, URLs, pacing. Loads `.env` by **explicit path** (§6, lesson 9). |
 | `session.py` | Saves and loads the browser storage state. |
 | `capture.py` | Drives the bookmarks page and intercepts GraphQL responses. |
 | `parse.py` | Turns a GraphQL page into rows. Network-free, so it is fully testable. |
@@ -102,7 +106,7 @@ X GraphQL  ->  capture  ->  raw pages (JSON on disk)
 | `transcribe.py` | Modal app (faster-whisper on up to 8 L4s). Writes `documents` rows. |
 | `translate.py` | Picks foreign chunks, translates them with Groq, caches by text hash. |
 | `chunk.py` | Turns rows, documents, and captions into embeddable pieces. |
-| `embed.py` | Ollama calls. Asymmetric prefixes (see §8). |
+| `embed.py` | Ollama calls. Asymmetric prefixes (§6, lesson 13). |
 | `index.py` | Builds `chunks`, `chunk_vec`, `chunk_fts`. Owns the vec0 connection. |
 | `search.py` | Hybrid retrieval with reciprocal rank fusion. |
 | `mcp_server.py` | Stdio MCP tools for search, bookmark details, and document reading. |
@@ -134,7 +138,7 @@ All tables live in `db.py`. `data/bookmarks.db`, WAL mode, `busy_timeout=30000`.
 | `chunks` | `id`, `tweet_id`, `source` (post/quote/article/link/image/video), `ref`, `position`, `text`, `source_text`, `lang`, `hash`. |
 | `chunk_vec` | vec0 virtual table, `FLOAT[768]`. |
 | `chunk_fts` | fts5 external-content table over `chunks`. |
-| `sync_state` | `watermark` = highest `sort_index` seen. |
+| `sync_state` | `watermark` = highest `sort_index` seen. `last_sync_at`. |
 | `raw_pages` | Every captured GraphQL page. **The DB can always be rebuilt from these.** |
 
 Two design points worth keeping:
@@ -145,36 +149,7 @@ Two design points worth keeping:
 
 ---
 
-## 5. Current state (all verified, not estimated)
-
-| Thing | Count |
-| --- | --- |
-Counted on 2026-10-03.
-
-| Thing | Count |
-| --- | --- |
-| Bookmarks | 1,350 |
-| Authors | 856 |
-| Media | 949 — 606 photo, 335 video, 8 gif |
-| Media with alt text | **18** |
-| Links (unique) | 626 |
-| Documents | 1,119 stored, **819 usable**: 683 pages, 136 transcripts. Every link has a row. |
-| Extracted words | **1,217,416** |
-| Chunks / vectors | 5,005 / 5,005 (608 image, 708 video, 13 translated) |
-| Captions | **605 of 606** photos. The one failure is a 404 at X. |
-| Video | 335 clips, 51.2 hours. 136 have speech (533k words), 61 have audio but no speech, 133 have no audio track. |
-
-Layers 1 and 2, image captions, and video transcripts are done and working.
-Search returns real passages from extracted pages, OCR text from images, and
-timestamped transcript text, not just post text.
-
-The unusable documents are mostly "thin extraction" (under the word floor),
-plus 10 binary targets (PDFs). `links.url` is stored under `normalize_url()`,
-the same key as `documents.url`, so the two join directly.
-
----
-
-## 6. Decisions already made. Do not re-open these.
+## 5. Decisions already made. Do not re-open these.
 
 **Embedding model: `embeddinggemma`.** Benchmarked against 4 alternatives on 55
 generated queries over the real corpus.
@@ -239,7 +214,7 @@ served.
 
 ---
 
-## 7. Hard-won lessons
+## 6. Hard-won lessons
 
 Each of these cost real time. Do not rediscover them.
 
@@ -317,10 +292,20 @@ Each of these cost real time. Do not rediscover them.
     chunked once per bookmark.
 26. **A capture with no media or links is the truth.** `normalize` replaces
     them unconditionally, so a stale photo and its caption leave the index.
+27. **`db.connect()` runs the schema on every connection, and workers connect
+    at once.** A `DROP VIEW` plus `CREATE VIEW` there made extract workers die
+    with `view bookmark_documents already exists`. Keep the schema safe to run
+    concurrently. `extract.run` raises when a worker crashes, because the
+    tally alone read `0 extracted 0 failed`.
+28. **`uv tool install` ignores `uv.lock`.** The global tool resolves its own
+    versions, so its Python and Playwright can differ from `.venv`. It must be
+    `--editable`, because `config.py` finds `.env` and `data/` relative to its
+    source file. Install its browser with
+    `~/.local/share/uv/tools/x-bookmarks-rag/bin/playwright install chromium`.
 
 ---
 
-## 7b. The CLI
+## 7. The CLI
 
 - `xbm sync` runs capture, extract, caption, transcribe, translate, index. A
   failed stage does not stop the rest; the run exits non-zero at the end.
@@ -336,18 +321,20 @@ Each of these cost real time. Do not rediscover them.
   startup costs the same 5 to 8 H100 minutes for 1 photo as for 600.
   `xbm caption` ignores the threshold. Transcripts need no threshold: L4
   startup is about a minute.
+- **Progress is timestamped lines from `console.log`, not spinners.** A spinner
+  shows only the latest item and leaves no record of what failed.
 
 ---
 
 ## 8. MCP server
 
-This is done. `mcp_server.py` uses MCP 2.0 and stdio transport. Codex has the
-server registered as `x-bookmarks`.
+`mcp_server.py` uses MCP 2.0 and stdio transport. The `xbm-mcp` entry point
+starts it.
 
 ### Why three tools, not one
 
 Search returns **one passage per bookmark**, so a long thread cannot crowd out
-a sharp short post. That hides scale:
+a sharp short post. That hides scale. Measured when the tools were designed:
 
 | Chunks per bookmark | Bookmarks |
 | --- | --: |
@@ -363,7 +350,7 @@ a way to know that deeper exists.
 ### The tools
 
 1. **`search_bookmarks(query, limit=10, author=None, source=None, after=None, before=None)`**
-   Wraps `search.search()`. Return per hit: `tweet_id`, `url`, `author`,
+   Wraps `search.search()`. Returns per hit: `tweet_id`, `url`, `author`,
    `created_at`, `score`, `best_source`, `best_chunk` (the passage that
    matched), `best_ref` (the page URL it came from), `chunk_count`,
    `word_count`, `media`, `lang`.
@@ -381,49 +368,29 @@ a way to know that deeper exists.
 
 2. **`get_bookmark(tweet_id)`**
    Full post text, quoted post, author, date, every link, every media item.
-   Each media item includes `caption` when one exists. Cheap and bounded.
-   Do **not** include document bodies here.
+   Each media item includes `caption` when one exists. Cheap and bounded,
+   because document bodies stay out of it.
 
 3. **`read_document(tweet_id_or_url, query=None, offset=0)`**
-   The extracted page text. **This one is dangerous if done naively**:
-   returning the CHANGELOG whole is roughly 100,000 tokens and would destroy
-   the caller's context. So:
-   - with `query`: run the same hybrid search **restricted to that document**
-     and return the best passages;
-   - without: page through with `offset` and return `has_more`.
-
-Use stdio transport. Add a `xbm-mcp` entry point in `[project.scripts]`.
-
-### Registration
-
-Codex uses this global registration:
-
-```bash
-codex mcp add x-bookmarks -- uv run --project ~/Developer/x-bookmarks-rag xbm-mcp
+   The extracted page text. It never returns a long document whole: the
+   CHANGELOG is roughly 100,000 tokens and would destroy the caller's context.
+   - With `query`, it runs the same hybrid search **restricted to that
+     document** and returns the best passages.
+   - Without, it pages through with `offset` and returns `has_more`.
 ```
-
-The server was tested through an MCP stdio client. All three tools returned
-structured results against the live corpus.
 
 ---
 
-## 9. Backlog after MCP
+## 9. Backlog
 
-In the owner's chosen order. Each layer must leave a working product.
-
-1. **Image captions and OCR.** Done. `uv run xbm caption` after each sync
-   captions only new photos, then `uv run xbm index`.
-2. **Video transcripts.** Done. `uv run xbm transcribe` after each sync, then
-   `uv run xbm index`. Uses `media.small_url`, never `url`.
-3. **Foreign language translation.** Done. `uv run xbm translate` after each
-   sync, then `uv run xbm index`.
-4. **Web UI.** Over the same `search.search()` function.
+**Web UI.** Build it over the same `search.search()` function. Nothing else
+remains.
 
 ---
 
 ## 10. How to verify your work
 
-- `uv run pytest -q` — 137 tests, all offline, about one second. Keep it that way.
+- `uv run pytest -q` — 138 tests, all offline, about one second. Keep it that way.
   Tests use synthetic GraphQL fixtures in `tests/fixtures.py` and stub
   `embed.embed_documents` / `embed.embed_query` with a deterministic vector.
 - Run a real query and read the passages:
